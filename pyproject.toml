@@ -11,6 +11,7 @@ dependencies = [
   "isort>=6.0.1",
   "langgraph>=0.3.21",
   "mypy>=1.15.0",
+  "psycopg2>=2.9.10",
   "psycopg2-binary>=2.9.10",
   "pydantic>=2.11.0",
   "pydantic-settings>=2.8.1",
