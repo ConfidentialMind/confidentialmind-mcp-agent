@@ -53,7 +53,6 @@ PG_CONNECTION_STRING="postgresql://username:password@hostname:5432/database"
 LLM_URL="http://localhost:8080/v1"  # Default
 LLM_API_KEY="your_api_key"  # Optional based on your LLM service
 
-CONFIDENTIALMIND_INTEGRATION=true
 CONFIDENTIAL_MIND_LOCAL_CONFIG=true
 
 # Optional: Set to enable debug logging

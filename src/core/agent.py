@@ -17,6 +17,16 @@ logging.basicConfig(
 logger = logging.getLogger("agent_orchestrator")
 
 
+class Message(BaseModel):
+    """A message in the conversation history"""
+
+    role: str
+    content: str
+
+    def __str__(self) -> str:
+        return f"{self.role.upper()}: {self.content}"
+
+
 class AgentState(BaseModel):
     """Agent workflow state"""
 
@@ -30,6 +40,7 @@ class AgentState(BaseModel):
     current_action_index: int = 0
     needs_more_info: bool = False
     follow_up_question: Optional[str] = None
+    conversation_history: List[Message] = Field(default_factory=list)
 
 
 class Agent:
@@ -39,6 +50,7 @@ class Agent:
         self.llm = llm_connector
         self.mcp_client = mcp_client
         self.debug = debug
+        self.conversation_history: List[Message] = []
 
         # Set logging level based on debug flag
         if debug:
@@ -53,6 +65,18 @@ class Agent:
 
         self.graph = self._build_graph().compile()
         logger.info("Agent workflow graph compiled")
+
+    def get_history(self) -> List[Message]:
+        """Get the conversation history.
+
+        Returns:
+            List of messages in the conversation history
+        """
+        return self.conversation_history
+
+    def clear_history(self) -> None:
+        """Clear the conversation history."""
+        self.conversation_history = []
 
     def _build_graph(self) -> StateGraph:
         """Build the agent workflow graph"""
@@ -120,6 +144,11 @@ class Agent:
             state.query,
         )
 
+        # Add the user query to conversation history (both in the state and in the agent)
+        new_message = Message(role="user", content=state.query)
+        state.conversation_history.append(new_message)
+        self.conversation_history.append(new_message)
+
         # Discover tools via the MCP Client
         mcp_info = "Tool Server: 'postgres' (Provides read-only PostgreSQL access)\n"
         try:
@@ -163,6 +192,15 @@ class Agent:
             logger.warning(f"Could not list resources: {e}")
             mcp_info += "\nWarning: Could not list available data resources."
 
+        # Format conversation history for the prompt
+        conversation_context = ""
+        if len(self.conversation_history) > 1:  # If there's any history beyond the current query
+            conversation_context = "\n\nPrevious conversation:\n"
+            # Only include previous interactions, not the current query which is already in the prompt
+            history_to_include = self.conversation_history[:-1]
+            for message in history_to_include:
+                conversation_context += f"{message}\n"
+
         prompt = f"""
         You need to analyze the user's query and determine which actions to perform using the available tool server.
         You can interact with the 'postgres' tool server using these MCP methods:
@@ -174,9 +212,14 @@ class Agent:
         Tool Server Information:
         {mcp_info}
 
+        Conversation history:
+        {conversation_context}
+
         User query: {state.query}
 
         Think step-by-step. If the query requires database schema knowledge you don't have, first plan an `mcp_readResource` action to fetch the schema for the relevant table(s). Then, plan the `mcp_callTool` action for the 'query' tool using the schema information.
+        
+        IMPORTANT: Use previous conversations for context when relevant. If the user refers to previous queries or results, use that context in your planning.
 
         Format your response as JSON:
         {{
@@ -355,11 +398,19 @@ class Agent:
             state.mcp_results
         )  # Assumes this formats dicts well
 
+        # Format conversation history for the prompt
+        conversation_context = ""
+        if state.conversation_history and len(state.conversation_history) > 1:
+            conversation_context = "\n\nPrevious conversation:\n"
+            for message in state.conversation_history:
+                conversation_context += f"{message}\n"
+
         # Prompt needs to understand the structure of MCP responses
         prompt = f"""
         Based on the user's query and the results from interacting with the MCP tool server, generate a helpful response.
 
         User query: {state.query}
+        {conversation_context}
 
         MCP Interaction Results:
         {formatted_results}
@@ -371,12 +422,20 @@ class Agent:
         - `mcp_callTool` results are under the 'content' key (usually a list with one text item). The 'text' field holds the tool output (e.g., JSON query results). Check the 'isError' flag.
 
         Synthesize these results into a clear answer for the user. Explain any errors encountered.
+        
+        IMPORTANT: Reference relevant information from previous conversations when applicable to maintain context in your response.
         """
 
         logger.debug("Sending response generation prompt to LLM")
         response = self.llm.generate(prompt)
         state.response = response
         logger.info("Response generated (length: %d characters)", len(response))
+
+        # Add the assistant's response to the conversation history
+        new_message = Message(role="assistant", content=response)
+        state.conversation_history.append(new_message)
+        self.conversation_history.append(new_message)
+
         return state
 
     def _format_results(self, results: Dict[str, Any]) -> str:
@@ -429,7 +488,28 @@ class Agent:
         logger.info("Starting agent workflow execution")
         logger.info("Query: %s", query)
 
+        # Check for conversation management commands
+        if query.strip().lower() == "clear history":
+            logger.info("Clearing conversation history")
+            self.clear_history()
+            response_state = AgentState(query=query)
+            response_state.response = "Conversation history has been cleared."
+            return response_state
+
+        if query.strip().lower() == "show history":
+            logger.info("Showing conversation history")
+            history_text = "Conversation history:\n\n"
+            for i, message in enumerate(self.conversation_history):
+                history_text += f"{i + 1}. {message}\n"
+            response_state = AgentState(query=query)
+            response_state.response = history_text
+            return response_state
+
         initial_state = AgentState(query=query)
+
+        # If we have conversation history, copy it to the new state
+        if self.conversation_history:
+            initial_state.conversation_history = self.conversation_history.copy()
 
         logger.debug("Invoking agent workflow graph")
         result = self.graph.invoke(initial_state)
@@ -453,6 +533,13 @@ class Agent:
                 logger.debug("Found 'response' in result dictionary")
                 new_state = AgentState(query=query)
                 new_state.response = result["response"]
+                # Add to conversation history
+                new_message = Message(role="user", content=query)
+                self.conversation_history.append(new_message)
+                new_state.conversation_history = self.conversation_history.copy()
+                new_message = Message(role="assistant", content=result["response"])
+                self.conversation_history.append(new_message)
+                new_state.conversation_history.append(new_message)
                 return new_state
 
         # If we couldn't convert it, create a fallback state
