@@ -13,11 +13,9 @@ from src.connectors.llm import LLMConnector
 from src.core.agent import Agent
 from src.mcp.mcp_client import MCPClient
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("postgres_integration")
-#
+
 # Global client instance to ensure cleanup
 mcp_client_instance: Optional[MCPClient] = None
 
@@ -31,9 +29,7 @@ def cleanup_mcp_client():
             mcp_client_instance.stop_server()
             logger.info("MCP server stopped successfully during cleanup.")
         except Exception as e:
-            logger.error(
-                f"Error stopping MCP server during cleanup: {e}", exc_info=True
-            )
+            logger.error(f"Error stopping MCP server during cleanup: {e}", exc_info=True)
 
 
 # Register the cleanup function
@@ -58,13 +54,13 @@ def create_mcp_client() -> MCPClient:
         os.path.dirname(__file__), "..", "mcp", "postgres_mcp_server.py"
     )
     if not os.path.exists(server_script_path):
-        logger.warning(
-            f"MCP server script not found at default path: {server_script_path}"
-        )
+        logger.warning(f"MCP server script not found at default path: {server_script_path}")
         # Attempt fallback assuming it's in the same directory or PATH accessible
         server_script_path = "postgres_mcp_server.py"  # Adjust if necessary
 
-    server_command = f'{sys.executable} {server_script_path} "{postgres_conn_string}"'  # Quote connection string
+    server_command = (
+        f'{sys.executable} {server_script_path} "{postgres_conn_string}"'  # Quote connection string
+    )
 
     try:
         logger.info("Initializing MCPClient...")
@@ -163,9 +159,7 @@ def run_query(agent: Agent, query: str) -> None:
 
         if result_state.error:
             print(f"\nAgent encountered an error state: {result_state.error}")
-            logger.error(
-                f"Agent workflow finished with error state: {result_state.error}"
-            )
+            logger.error(f"Agent workflow finished with error state: {result_state.error}")
 
         # Optional: Print debug info even if main response exists
         if agent.debug or result_state.error:
@@ -256,7 +250,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # Load .env - keep this if you use it
     try:
         from dotenv import load_dotenv
 

@@ -38,9 +38,7 @@ class PostgresHandler:
         self._conn = None
         self._pool = psycopg2.pool.SimpleConnectionPool(1, 5, dsn=database_url)
         self.resource_base_url_parts = urlparse(database_url)
-        logging.info(
-            f"Initialized PostgresHandler for {self.resource_base_url_parts.path}"
-        )
+        logging.info(f"Initialized PostgresHandler for {self.resource_base_url_parts.path}")
 
     def _get_connection(self):
         return self._pool.getconn()
@@ -80,9 +78,7 @@ class PostgresHandler:
         finally:
             self._release_connection(conn)
 
-    def handle_read_resource(
-        self, params: ReadResourceRequestParams
-    ) -> ReadResourceResponse:
+    def handle_read_resource(self, params: ReadResourceRequestParams) -> ReadResourceResponse:
         logging.info(f"Handling mcp_readResource for URI: {params.uri}")
         conn = self._get_connection()
         try:
@@ -108,9 +104,7 @@ class PostgresHandler:
                 )
                 columns = cur.fetchall()
                 if not columns:
-                    raise ValueError(
-                        f"Table 'public.{table_name}' not found or has no columns."
-                    )
+                    raise ValueError(f"Table 'public.{table_name}' not found or has no columns.")
 
                 content_json = json.dumps(columns, indent=2)
                 return ReadResourceResponse(
@@ -157,9 +151,7 @@ class PostgresHandler:
         sql_query = params.arguments["sql"]
         # Basic validation: Disallow obviously non-SELECT queries (can be bypassed, needs robust parser)
         if not sql_query.strip().upper().startswith(("SELECT", "EXPLAIN", "SHOW")):
-            raise ValueError(
-                "Only SELECT, EXPLAIN, or SHOW queries are allowed for safety."
-            )
+            raise ValueError("Only SELECT, EXPLAIN, or SHOW queries are allowed for safety.")
 
         conn = self._get_connection()
         try:
@@ -168,17 +160,13 @@ class PostgresHandler:
                 cur.execute("BEGIN TRANSACTION READ ONLY")
                 try:
                     logging.info(f"Executing SQL: {sql_query[:100]}...")
-                    cur.execute(
-                        sql.SQL(sql_query)
-                    )  # Use sql.SQL for safety if params were allowed
+                    cur.execute(sql.SQL(sql_query))  # Use sql.SQL for safety if params were allowed
                     results = cur.fetchall()
                     result_json = json.dumps(
                         results, indent=2, default=str
                     )  # Handle potential non-serializable types
                     logging.info(f"Query successful, returning {len(results)} rows.")
-                    return CallToolResponse(
-                        content=[TextContent(text=result_json)], isError=False
-                    )
+                    return CallToolResponse(content=[TextContent(text=result_json)], isError=False)
                 except Exception as query_error:
                     logging.error(f"SQL execution error: {query_error}", exc_info=True)
                     conn.rollback()  # Ensure rollback on error within transaction
@@ -217,9 +205,7 @@ def run_server(db_url: str):
             try:
                 request_data = json.loads(line)
                 request = JsonRpcRequest.model_validate(request_data)
-                logging.info(
-                    f"Processing request ID {request.id}, Method: {request.method}"
-                )
+                logging.info(f"Processing request ID {request.id}, Method: {request.method}")
 
                 response_data = None
                 error_data = None
@@ -228,31 +214,21 @@ def run_server(db_url: str):
                     if request.method == "mcp_listResources":
                         response_data = handler.handle_list_resources().model_dump()
                     elif request.method == "mcp_readResource":
-                        params = ReadResourceRequestParams.model_validate(
-                            request.params or {}
-                        )
-                        response_data = handler.handle_read_resource(
-                            params
-                        ).model_dump()
+                        params = ReadResourceRequestParams.model_validate(request.params or {})
+                        response_data = handler.handle_read_resource(params).model_dump()
                     elif request.method == "mcp_listTools":
                         response_data = handler.handle_list_tools().model_dump()
                     elif request.method == "mcp_callTool":
-                        params = CallToolRequestParams.model_validate(
-                            request.params or {}
-                        )
+                        params = CallToolRequestParams.model_validate(request.params or {})
                         response_data = handler.handle_call_tool(params).model_dump()
                     else:
                         raise ValueError(f"Unsupported MCP method: {request.method}")
 
                 except Exception as e:
-                    logging.error(
-                        f"Error handling request {request.id}: {e}", exc_info=True
-                    )
+                    logging.error(f"Error handling request {request.id}: {e}", exc_info=True)
                     error_data = {"code": -32000, "message": str(e)}
 
-                response = JsonRpcResponse(
-                    id=request.id, result=response_data, error=error_data
-                )
+                response = JsonRpcResponse(id=request.id, result=response_data, error=error_data)
 
             except json.JSONDecodeError:
                 logging.error(f"Failed to decode JSON: {line.strip()}")
@@ -260,15 +236,9 @@ def run_server(db_url: str):
                     id=None, error={"code": -32700, "message": "Parse error"}
                 )
             except Exception as e:  # Catch validation errors etc.
-                logging.error(
-                    f"General error processing input line: {e}", exc_info=True
-                )
+                logging.error(f"General error processing input line: {e}", exc_info=True)
                 # Try to get request ID if possible, otherwise use null
-                req_id = (
-                    request.id
-                    if "request" in locals() and hasattr(request, "id")
-                    else None
-                )
+                req_id = request.id if "request" in locals() and hasattr(request, "id") else None
                 response = JsonRpcResponse(
                     id=req_id,
                     error={"code": -32600, "message": f"Invalid Request: {e}"},

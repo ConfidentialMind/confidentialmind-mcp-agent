@@ -4,4 +4,39 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "black>=25.1.0",
+  "confidentialmind-core>=0.1.6",
+  "fastapi>=0.115.12",
+  "isort>=6.0.1",
+  "langgraph>=0.3.21",
+  "mypy>=1.15.0",
+  "psycopg2-binary>=2.9.10",
+  "pydantic>=2.11.0",
+  "pydantic-settings>=2.8.1",
+  "pytest>=8.3.5",
+  "python-dotenv>=1.1.0",
+  "requests>=2.32.3",
+  "ruff>=0.11.2",
+  "uvicorn>=0.34.0",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[tool.ruff]
+select = ["E", "F", "I"]
+ignore = []
+line-length = 100
+target-version = "py310"

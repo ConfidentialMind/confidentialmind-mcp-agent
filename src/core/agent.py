@@ -120,19 +120,6 @@ class Agent:
             state.query[:100] + "..." if len(state.query) > 100 else state.query,
         )
 
-        # available_mcps = self.mcp_registry.list_mcps()
-        # mcp_details = []
-        #
-        # for mcp_name in available_mcps:
-        #     mcp = self.mcp_registry.get_mcp(mcp_name)
-        #     if mcp:
-        #         mcp_details.append(
-        #             f"{mcp.name}: {mcp.description}. Supported actions: {', '.join(mcp.supported_actions)}"
-        #         )
-        #
-        # mcp_info = "\n".join(mcp_details)
-        # logger.debug("Available MCPs for planning: %s", ", ".join(available_mcps))
-
         # Discover tools via the MCP Client
         mcp_info = "Tool Server: 'postgres' (Provides read-only PostgreSQL access)\n"
         try:
@@ -155,9 +142,7 @@ class Agent:
             logger.debug("Fetched tools description via MCPClient")
 
         except Exception as e:
-            logger.error(
-                f"Failed to list tools via MCPClient: {e}", exc_info=self.debug
-            )
+            logger.error(f"Failed to list tools via MCPClient: {e}", exc_info=self.debug)
             mcp_info += "Error: Could not retrieve tools from the server.\n"
 
             # Optionally surface this error in the agent state
@@ -171,13 +156,9 @@ class Agent:
             resources_response = self.mcp_client.list_resources()
             resources = resources_response.get("resources", [])
             if resources:
-                mcp_info += (
-                    "\nAvailable Data Resources (Schemas - use readResource to view):\n"
-                )
+                mcp_info += "\nAvailable Data Resources (Schemas - use readResource to view):\n"
                 for res in resources[:10]:  # Limit for prompt length
-                    mcp_info += (
-                        f"- {res.get('name', res.get('uri'))} (URI: {res.get('uri')})\n"
-                    )
+                    mcp_info += f"- {res.get('name', res.get('uri'))} (URI: {res.get('uri')})\n"
                 if len(resources) > 10:
                     mcp_info += "- ... and more\n"
         except Exception as e:
@@ -298,9 +279,7 @@ class Agent:
             logger.debug("MCP action execution successful via MCPClient")
             state.thoughts.append(f"Action result: Successfully executed {mcp_method}")
             # Store result with a unique key per action
-            state.mcp_results[f"action_{state.current_action_index}_{mcp_method}"] = (
-                result
-            )
+            state.mcp_results[f"action_{state.current_action_index}_{mcp_method}"] = result
 
         except Exception as e:
             error_msg = str(e)
@@ -354,9 +333,7 @@ class Agent:
         response = self.llm.generate(prompt)
         parsed_response = self._parse_json_response(response)
 
-        thought = parsed_response.get(
-            "thought", "Determining if additional actions are needed"
-        )
+        thought = parsed_response.get("thought", "Determining if additional actions are needed")
         state.thoughts.append(thought)
 
         # Update actions list
@@ -364,9 +341,7 @@ class Agent:
         if new_actions:
             state.planned_actions = new_actions
             state.current_action_index = 0
-            state.thoughts.append(
-                f"Planning additional actions: {len(new_actions)} actions"
-            )
+            state.thoughts.append(f"Planning additional actions: {len(new_actions)} actions")
         else:
             state.planned_actions = []
             state.thoughts.append("No additional actions needed")
@@ -418,28 +393,6 @@ class Agent:
         """Parse JSON response from LLM"""
         import re
 
-        # try:
-        #     # Extract JSON if it's within a code block
-        #     if "```json" in response:
-        #         start = response.find("```json") + 7
-        #         end = response.find("```", start)
-        #         json_str = response[start:end].strip()
-        #     elif "```" in response:
-        #         # Try to find any code block
-        #         start = response.find("```") + 3
-        #         # Check if there's a language specifier
-        #         if response[start : start + 10].split("\n")[0].strip():
-        #             start = response.find("\n", start) + 1
-        #         end = response.find("```", start)
-        #         json_str = response[start:end].strip()
-        #     else:
-        #         # Try to find JSON-like content
-        #         match = re.search(r"(\{.*\})", response, re.DOTALL)
-        #         json_str = match.group(0) if match else response
-        #
-        #     return json.loads(json_str)
-        # except Exception as e:
-        #     return {"thought": f"Failed to parse LLM response: {str(e)}", "actions": []}
         try:
             # Extract JSON block if present
             match = re.search(r"```json\s*([\s\S]*?)\s*```", response)
@@ -467,55 +420,13 @@ class Agent:
                 "actions": [],
             }
         except Exception as e:
-            logger.error(
-                f"Unexpected error parsing LLM response: {e}", exc_info=self.debug
-            )
+            logger.error(f"Unexpected error parsing LLM response: {e}", exc_info=self.debug)
             return {
                 "thought": f"Error: Unexpected error parsing LLM response. {e}",
                 "actions": [],
             }
 
-    # def execute_mcp_action(self, mcp_name: str, action: Dict[str, Any]) -> Any:
-    #     """Execute a single MCP action directly, bypassing the graph
-    #
-    #     This is useful for fetching information needed before running the main agent workflow.
-    #     """
-    #     logger.info(
-    #         "Direct execution of MCP %s action: %s", mcp_name, action.get("operation", "unknown")
-    #     )
-    #
-    #     mcp = self.mcp_registry.get_mcp(mcp_name)
-    #     if not mcp:
-    #         logger.error("MCP '%s' not found for direct execution", mcp_name)
-    #         raise ValueError(f"MCP '{mcp_name}' not found")
-    #
-    #     try:
-    #         logger.debug("Executing MCP %s with action: %s", mcp_name, action)
-    #         result = mcp.execute(action)
-    #         logger.debug("Direct MCP execution successful")
-    #
-    #         # Log result summary
-    #         if isinstance(result, dict):
-    #             if "error" in result:
-    #                 logger.info("MCP execution returned error: %s", result["error"])
-    #             else:
-    #                 keys = list(result.keys())
-    #                 logger.info("MCP execution returned result with keys: %s", keys)
-    #         elif isinstance(result, list):
-    #             logger.info("MCP execution returned list with %d items", len(result))
-    #         else:
-    #             logger.info("MCP execution returned result of type: %s", type(result).__name__)
-    #
-    #         return result
-    #     except Exception as e:
-    #         logger.error(
-    #             "Error in direct execution of %s action: %s", mcp_name, str(e), exc_info=self.debug
-    #         )
-    #         raise RuntimeError(f"Error executing {mcp_name} action: {str(e)}")
-
-    def run(
-        self, query: str, mcp_options: Optional[Dict[str, Any]] = None
-    ) -> AgentState:
+    def run(self, query: str) -> AgentState:
         """Execute the complete agent workflow"""
         logger.info("Starting agent workflow execution")
         logger.info("Query: %s", query[:100] + "..." if len(query) > 100 else query)

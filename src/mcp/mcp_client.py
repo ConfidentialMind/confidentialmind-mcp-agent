@@ -16,9 +16,7 @@ logging.basicConfig(
 
 
 class MCPClient:
-    def __init__(
-        self, server_command: str, server_env: Optional[Dict[str, str]] = None
-    ):
+    def __init__(self, server_command: str, server_env: Optional[Dict[str, str]] = None):
         self.server_command = server_command.split()  # Split command string into list
         self.server_env = {**os.environ, **(server_env or {})}  # Merge env vars
         self._process: Optional[subprocess.Popen] = None
@@ -49,9 +47,7 @@ class MCPClient:
                 # Give server a moment to start
                 time.sleep(1)
                 if self._process.poll() is not None:
-                    stderr_output = (
-                        self._process.stderr.read() if self._process.stderr else "N/A"
-                    )
+                    stderr_output = self._process.stderr.read() if self._process.stderr else "N/A"
                     raise RuntimeError(
                         f"Server process failed to start. Exit code: {self._process.returncode}. Stderr:\n{stderr_output}"
                     )
@@ -63,9 +59,7 @@ class MCPClient:
                 logging.info(f"MCP server process started (PID: {self._process.pid})")
 
                 # Start a thread to monitor stderr
-                self._stderr_thread = threading.Thread(
-                    target=self._monitor_stderr, daemon=True
-                )
+                self._stderr_thread = threading.Thread(target=self._monitor_stderr, daemon=True)
                 self._stderr_thread.start()
 
             except Exception as e:
@@ -91,9 +85,7 @@ class MCPClient:
                         response_data = json.loads(line)
                         self._response_queue.put(response_data)
                     except json.JSONDecodeError:
-                        logging.error(
-                            f"Failed to decode JSON from server: {line.strip()}"
-                        )
+                        logging.error(f"Failed to decode JSON from server: {line.strip()}")
             logging.info("Server response listener thread finished.")
         except Exception as e:
             logging.error(f"Error in server response listener thread: {e}")
@@ -101,9 +93,7 @@ class MCPClient:
     def stop_server(self):
         with self._lock:
             if self._process and self._process.poll() is None:
-                logging.info(
-                    f"Stopping MCP server process (PID: {self._process.pid})..."
-                )
+                logging.info(f"Stopping MCP server process (PID: {self._process.pid})...")
                 try:
                     self._process.terminate()  # Try graceful termination
                     self._process.wait(timeout=5)  # Wait a bit
@@ -121,9 +111,7 @@ class MCPClient:
             if self._stderr_thread and self._stderr_thread.is_alive():
                 logging.debug("Stderr thread is daemon, will exit with main process.")
 
-    def _send_request(
-        self, method: str, params: Optional[Dict[str, Any]] = None
-    ) -> Any:
+    def _send_request(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
         with self._lock:
             if not self._process or self._process.poll() is not None:
                 logging.error("Server process is not running. Attempting restart.")
@@ -177,9 +165,7 @@ class MCPClient:
                 raise  # Re-raise validation or other processing errors
 
         logging.error(f"Timeout waiting for response for request ID {request_id}")
-        raise TimeoutError(
-            f"Timeout waiting for MCP server response (ID: {request_id})"
-        )
+        raise TimeoutError(f"Timeout waiting for MCP server response (ID: {request_id})")
 
     # --- Convenience methods for MCP calls ---
 
@@ -192,12 +178,8 @@ class MCPClient:
     def list_tools(self) -> Dict[str, Any]:
         return self._send_request("mcp_listTools")
 
-    def call_tool(
-        self, name: str, arguments: Optional[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        return self._send_request(
-            "mcp_callTool", {"name": name, "arguments": arguments}
-        )
+    def call_tool(self, name: str, arguments: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        return self._send_request("mcp_callTool", {"name": name, "arguments": arguments})
 
     def __del__(self):
         # Ensure server is stopped when client is garbage collected

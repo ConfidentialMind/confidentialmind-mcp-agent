@@ -8,7 +8,8 @@ from confidentialmind_core.config_manager import (
 from pydantic import BaseModel
 
 from src.connectors.llm import LLMConnector
-from src.mcp.registry import MCPRegistry
+
+# from src.mcp.registry import MCPRegistry
 
 
 class ConfidentialMindConnector:
@@ -40,9 +41,7 @@ class ConfidentialMindConnector:
                     type=mcp_info.get("type", "api"),
                     label=mcp_info.get("label", f"MCP: {mcp_id}"),
                     config_id=mcp_id,
-                    description=mcp_info.get(
-                        "description", f"Connection for {mcp_id} services"
-                    ),
+                    description=mcp_info.get("description", f"Connection for {mcp_id} services"),
                 )
             )
 
@@ -53,9 +52,7 @@ class ConfidentialMindConnector:
             array_connectors=self.array_connector_schemas,
         )
 
-    def register_mcp_connector(
-        self, mcp_id: str, mcp_type: str, label: str, description: str = ""
-    ):
+    def register_mcp_connector(self, mcp_id: str, mcp_type: str, label: str, description: str = ""):
         """Register an MCP connector"""
         self.mcp_config_ids[mcp_id] = {
             "type": mcp_type,
@@ -64,10 +61,7 @@ class ConfidentialMindConnector:
         }
 
         # If config manager is already initialized, update connectors
-        if (
-            hasattr(self.config_manager, "connectors")
-            and self.config_manager.connectors
-        ):
+        if hasattr(self.config_manager, "connectors") and self.config_manager.connectors:
             self.connector_schemas.append(
                 ConnectorSchema(
                     type=mcp_type,
@@ -102,40 +96,40 @@ class ConfidentialMindConnector:
             base_url, headers = self.get_api_parameters(self.llm_config_id)
             return LLMConnector(base_url=base_url, headers=headers)
 
-    def get_mcp_registry(self) -> MCPRegistry:
-        """Create and configure MCP registry from ConfidentialMind connectors"""
-        from src.agent_orchestrator.mcp.examples.database import DatabaseMCP
-        from src.agent_orchestrator.mcp.examples.monitoring import MonitoringMCP
-
-        registry = MCPRegistry()
-
-        # Create and register MCPs based on configured connectors
-        for mcp_id, mcp_info in self.mcp_config_ids.items():
-            try:
-                base_url, headers = self.get_api_parameters(mcp_id)
-
-                # Instantiate appropriate MCP based on type
-                mcp_type = mcp_info.get("type", "").lower()
-
-                if "database" in mcp_type or "db" in mcp_type:
-                    mcp = DatabaseMCP(base_url=base_url, headers=headers)
-                elif "monitor" in mcp_type:
-                    mcp = MonitoringMCP(base_url=base_url, headers=headers)
-                elif "postgres" in mcp_type and "service_type" in mcp_info:
-                    # Import dynamically to avoid circular imports
-                    from examples.custom_mcp.postgres_service_mcp import PostgreSQLMCP
-
-                    mcp = PostgreSQLMCP(connection_string=base_url)
-                # Add more MCP types as needed
-                else:
-                    # Generic API-based MCP
-                    continue  # Skip for now
-
-                registry.register(mcp)
-            except Exception as e:
-                print(f"Error initializing MCP {mcp_id}: {str(e)}")
-
-        return registry
+    # def get_mcp_registry(self) -> MCPRegistry:
+    #     """Create and configure MCP registry from ConfidentialMind connectors"""
+    #     from src.agent_orchestrator.mcp.examples.database import DatabaseMCP
+    #     from src.agent_orchestrator.mcp.examples.monitoring import MonitoringMCP
+    #
+    #     registry = MCPRegistry()
+    #
+    #     # Create and register MCPs based on configured connectors
+    #     for mcp_id, mcp_info in self.mcp_config_ids.items():
+    #         try:
+    #             base_url, headers = self.get_api_parameters(mcp_id)
+    #
+    #             # Instantiate appropriate MCP based on type
+    #             mcp_type = mcp_info.get("type", "").lower()
+    #
+    #             if "database" in mcp_type or "db" in mcp_type:
+    #                 mcp = DatabaseMCP(base_url=base_url, headers=headers)
+    #             elif "monitor" in mcp_type:
+    #                 mcp = MonitoringMCP(base_url=base_url, headers=headers)
+    #             elif "postgres" in mcp_type and "service_type" in mcp_info:
+    #                 # Import dynamically to avoid circular imports
+    #                 from examples.custom_mcp.postgres_service_mcp import PostgreSQLMCP
+    #
+    #                 mcp = PostgreSQLMCP(connection_string=base_url)
+    #             # Add more MCP types as needed
+    #             else:
+    #                 # Generic API-based MCP
+    #                 continue  # Skip for now
+    #
+    #             registry.register(mcp)
+    #         except Exception as e:
+    #             print(f"Error initializing MCP {mcp_id}: {str(e)}")
+    #
+    #     return registry
 
     def register_postgres_service(self, service_type: str, label: str = None):
         """Register a PostgreSQL service as an MCP"""
