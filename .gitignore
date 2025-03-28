@@ -1,0 +1,12 @@
+python*/
+__pycache__/
+.pytest_cache/
+.git/
+.github/
+.ruff_cache/
+.venv/
+.env
+.DS_Store
+
+CLAUDE.md
+
