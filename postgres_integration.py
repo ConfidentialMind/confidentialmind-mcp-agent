@@ -1,5 +1,3 @@
-"""Example of integrating the Agent Orchestrator with PostgreSQL database."""
-
 import argparse
 import atexit
 import json
@@ -8,7 +6,6 @@ import os
 import sys
 from typing import Optional
 
-from src.connectors.confidentialmind import ConfidentialMindConnector
 from src.connectors.llm import LLMConnector
 from src.core.agent import Agent
 from src.mcp.mcp_client import MCPClient
@@ -74,32 +71,6 @@ def create_mcp_client() -> MCPClient:
         # Ensure cleanup is attempted even if constructor fails partially
         cleanup_mcp_client()
         raise  # Re-raise the exception
-
-
-def setup_with_confidentialmind() -> Agent:
-    """Set up agent using ConfidentialMind SDK"""
-    from src.agent_orchestrator.cm_types.cm_types import AgentOrchestratorAppConfig
-
-    # Initialize ConfidentialMind connector
-    cm_connector = ConfidentialMindConnector()
-
-    # Register PostgreSQL service
-    cm_connector.register_postgres_service("postgres")
-
-    # Initialize connector with ConfidentialMind
-    cm_connector.init_connector(config_model=AgentOrchestratorAppConfig())
-
-    # Get LLM connector from ConfidentialMind
-    llm_connector = cm_connector.get_llm_connector()
-    logger.info("CM connector initialized")
-
-    # Get MCP registry from ConfidentialMind
-    mcp_client = create_mcp_client()
-
-    # Create agent with debug logging enabled
-    agent = Agent(llm_connector, mcp_client, debug=True)
-    logger.info("Agent initialized with CM LLMConnector and MCPClient.")
-    return agent
 
 
 def setup_with_env_vars() -> Agent:
@@ -215,11 +186,7 @@ def main():
 
     agent = None
     try:
-        # Setup agent based on mode
-        if args.mode == "cm":
-            agent = setup_with_confidentialmind()
-        else:  # Default is 'env'
-            agent = setup_with_env_vars()
+        agent = setup_with_env_vars()
 
     except (ValueError, RuntimeError, ImportError) as setup_error:
         logger.error(f"Failed to set up agent: {setup_error}", exc_info=True)

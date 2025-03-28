@@ -1,4 +1,3 @@
-# mcp_client.py
 import json
 import logging
 import os

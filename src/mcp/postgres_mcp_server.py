@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# postgres_mcp_server.py
 import json
 import logging
 import sys
