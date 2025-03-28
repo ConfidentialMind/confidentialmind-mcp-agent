@@ -172,7 +172,7 @@ class PostgresHandler:
                 logging.info("Starting READ ONLY transaction")
                 cur.execute("BEGIN TRANSACTION READ ONLY")
                 try:
-                    logging.info(f"Executing SQL: {sql_query[:100]}...")
+                    logging.info(f"Executing SQL: {sql_query}...")
                     cur.execute(sql.SQL(sql_query))  # Use sql.SQL for safety if params were allowed
                     results = cur.fetchall()
                     result_json = json.dumps(

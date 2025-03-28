@@ -117,7 +117,7 @@ class Agent:
         """Use LLM to determine which MCPs and actions are needed"""
         logger.info(
             "Parsing user query: %s",
-            state.query[:100] + "..." if len(state.query) > 100 else state.query,
+            state.query,
         )
 
         # Discover tools via the MCP Client
@@ -157,10 +157,8 @@ class Agent:
             resources = resources_response.get("resources", [])
             if resources:
                 mcp_info += "\nAvailable Data Resources (Schemas - use readResource to view):\n"
-                for res in resources[:10]:  # Limit for prompt length
+                for res in resources:  # Limit for prompt length
                     mcp_info += f"- {res.get('name', res.get('uri'))} (URI: {res.get('uri')})\n"
-                if len(resources) > 10:
-                    mcp_info += "- ... and more\n"
         except Exception as e:
             logger.warning(f"Could not list resources: {e}")
             mcp_info += "\nWarning: Could not list available data resources."
@@ -209,7 +207,7 @@ class Agent:
         state.thoughts.append(thought)
         logger.info(
             "Agent thought: %s",
-            thought[:100] + "..." if len(thought) > 100 else thought,
+            thought,
         )
 
         # Process actions
@@ -245,7 +243,7 @@ class Agent:
         action_spec = state.planned_actions[state.current_action_index]
         mcp_method = action_spec.get("mcp_method")
         params = action_spec.get("params", {})
-        action_label = f"{mcp_method}({json.dumps(params, default=str)[:50]}...)"
+        action_label = f"{mcp_method}({json.dumps(params, default=str)}...)"
 
         logger.info(
             "Executing action %d/%d: %s",
@@ -429,7 +427,7 @@ class Agent:
     def run(self, query: str) -> AgentState:
         """Execute the complete agent workflow"""
         logger.info("Starting agent workflow execution")
-        logger.info("Query: %s", query[:100] + "..." if len(query) > 100 else query)
+        logger.info("Query: %s", query)
 
         initial_state = AgentState(query=query)
 
