@@ -54,7 +54,7 @@ LLM_URL="http://localhost:8080/v1"  # Default
 LLM_API_KEY="your_api_key"  # Optional based on your LLM service
 
 CONFIDENTIALMIND_INTEGRATION=true
-CONFIDENTIAL_MIND_LOCAL_CONFIG=True
+CONFIDENTIAL_MIND_LOCAL_CONFIG=true
 
 # Optional: Set to enable debug logging
 DEBUG=true
@@ -72,9 +72,6 @@ python postgres_integration.py
 
 # Run a single query
 python postgres_integration.py --query "What tables do I have in my database?"
-
-# Run with ConfidentialMind integration
-python postgres_integration.py --mode cm
 ```
 
 ### Example Queries
@@ -150,4 +147,3 @@ The agent uses a LangGraph-based workflow:
 - PostgreSQL database
 - Access to an LLM API service (local or remote)
 - ConfidentialMind account (optional)
-
