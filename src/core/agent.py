@@ -533,6 +533,13 @@ class Agent:
                 logger.debug("Found 'response' in result dictionary")
                 new_state = AgentState(query=query)
                 new_state.response = result["response"]
+
+                if "thoughts" in result:
+                    new_state.thoughts = result["thoughts"]
+
+                if "mcp_results" in result:
+                    new_state.mcp_results = result["mcp_results"]
+
                 # Add to conversation history
                 new_message = Message(role="user", content=query)
                 self.conversation_history.append(new_message)
@@ -540,6 +547,10 @@ class Agent:
                 new_message = Message(role="assistant", content=result["response"])
                 self.conversation_history.append(new_message)
                 new_state.conversation_history.append(new_message)
+
+                if "error" in result:
+                    new_state.error = result["error"]
+
                 return new_state
 
         # If we couldn't convert it, create a fallback state
