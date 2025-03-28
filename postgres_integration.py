@@ -48,7 +48,7 @@ def create_mcp_client() -> MCPClient:
     # Define the command to run the MCP server
     # Adjust path relative to this script if needed
     server_script_path = os.path.join(
-        os.path.dirname(__file__), "..", "mcp", "postgres_mcp_server.py"
+        os.path.dirname(__file__), "src", "mcp", "postgres_mcp_server.py"
     )
     if not os.path.exists(server_script_path):
         logger.warning(f"MCP server script not found at default path: {server_script_path}")
@@ -56,7 +56,7 @@ def create_mcp_client() -> MCPClient:
         server_script_path = "postgres_mcp_server.py"  # Adjust if necessary
 
     server_command = (
-        f'{sys.executable} {server_script_path} "{postgres_conn_string}"'  # Quote connection string
+        f"{sys.executable} {server_script_path} {postgres_conn_string}"  # Do not quote connection string
     )
 
     try:

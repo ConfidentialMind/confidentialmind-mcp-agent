@@ -5,9 +5,8 @@ from urllib.parse import urlparse, urlunparse
 
 import psycopg2
 import psycopg2.extras
-from psycopg2 import sql
-
-from src.mcp.mcp_protocol import (
+import psycopg2.pool
+from mcp_protocol import (
     CallToolRequestParams,
     CallToolResponse,
     JsonRpcRequest,
@@ -22,6 +21,7 @@ from src.mcp.mcp_protocol import (
     ToolDefinition,
     ToolInputSchema,
 )
+from psycopg2 import sql
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [MCP Server] %(levelname)s: %(message)s"
