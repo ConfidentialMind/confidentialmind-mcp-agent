@@ -44,34 +44,43 @@ class PostgresHandler:
     def _release_connection(self, conn):
         self._pool.putconn(conn)
 
-    def _build_resource_uri(self, table_name: str) -> str:
-        # Build URI like postgres://user@host:port/db_name/table_name/schema
-        # Clear password for safety in URI
+    def _build_resource_uri(self, table_name: str, schema_name: str = "public") -> str:
+        # Build URI like postgres://user@host:port/db_name/schema_name/table_name/schema
         parts = self.resource_base_url_parts._replace(
             netloc=f"{self.resource_base_url_parts.username}@{self.resource_base_url_parts.hostname}:{self.resource_base_url_parts.port or 5432}",
-            path=f"{self.resource_base_url_parts.path or ''}/{table_name}/schema",  # Append /table/schema
+            path=f"{self.resource_base_url_parts.path or ''}/{schema_name}/{table_name}/schema",
         )
-        return urlunparse(parts._replace(scheme="postgres"))  # Use postgres: scheme
+        return urlunparse(parts._replace(scheme="postgres"))
 
     def handle_list_resources(self) -> ListResourcesResponse:
         logging.info("Handling mcp_listResources")
         conn = self._get_connection()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Assuming public schema for simplicity, like the TS example
+                # List schemas (excluding system schemas)
                 cur.execute(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+                    "SELECT schema_name FROM information_schema.schemata "
+                    "WHERE schema_name NOT LIKE 'pg_%' AND schema_name != 'information_schema'"
                 )
-                rows = cur.fetchall()
-                resources = [
-                    ResourceIdentifier(
-                        uri=self._build_resource_uri(row["table_name"]),
-                        name=f'"{row["table_name"]}" table schema (public schema)',
-                        mimeType="application/json",
+                schemas = [row["schema_name"] for row in cur.fetchall()]
+
+                resources = []
+                # For each schema, list its tables
+                for schema in schemas:
+                    cur.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = %s AND table_type = 'BASE TABLE'",
+                        (schema,),
                     )
-                    for row in rows
-                ]
+                    tables = cur.fetchall()
+                    for row in tables:
+                        resources.append(
+                            ResourceIdentifier(
+                                uri=self._build_resource_uri(row["table_name"], schema),
+                                name=f'"{schema}.{row["table_name"]}" table schema',
+                                mimeType="application/json",
+                            )
+                        )
                 return ListResourcesResponse(resources=resources)
         finally:
             self._release_connection(conn)
@@ -83,26 +92,32 @@ class PostgresHandler:
             parsed_uri = urlparse(params.uri)
             path_parts = parsed_uri.path.strip("/").split("/")
 
-            # Expected path: /db_name/table_name/schema (or just /table_name/schema if db is implicit)
-            if len(path_parts) < 2 or path_parts[-1] != "schema":
+            # Expected path: /db_name/schema_name/table_name/schema
+            if len(path_parts) < 3 or path_parts[-1] != "schema":
                 raise ValueError(f"Invalid resource URI path format: {parsed_uri.path}")
 
             table_name = path_parts[-2]
-            # Simple validation, production code needs more robustness
+            schema_name = path_parts[-3]
+
+            # Simple validation
             if not table_name.isalnum() and "_" not in table_name:
                 raise ValueError(f"Invalid table name extracted: {table_name}")
+            if not schema_name.isalnum() and "_" not in schema_name:
+                raise ValueError(f"Invalid schema name extracted: {schema_name}")
 
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     "SELECT column_name, data_type, is_nullable "
                     "FROM information_schema.columns "
-                    "WHERE table_schema = 'public' AND table_name = %s "
+                    "WHERE table_schema = %s AND table_name = %s "
                     "ORDER BY ordinal_position",
-                    (table_name,),
+                    (schema_name, table_name),
                 )
                 columns = cur.fetchall()
                 if not columns:
-                    raise ValueError(f"Table 'public.{table_name}' not found or has no columns.")
+                    raise ValueError(
+                        f"Table '{schema_name}.{table_name}' not found or has no columns."
+                    )
 
                 content_json = json.dumps(columns, indent=2)
                 return ReadResourceResponse(
@@ -123,7 +138,7 @@ class PostgresHandler:
             tools=[
                 ToolDefinition(
                     name="query",
-                    description="Run a read-only SQL query against the 'public' schema.",
+                    description="Run a read-only SQL query against any accessible schema in the database.",
                     inputSchema=ToolInputSchema(
                         type="object",
                         properties={
