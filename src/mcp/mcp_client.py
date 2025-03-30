@@ -5,7 +5,7 @@ import queue
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from src.mcp.mcp_protocol import JsonRpcRequest, JsonRpcResponse
 

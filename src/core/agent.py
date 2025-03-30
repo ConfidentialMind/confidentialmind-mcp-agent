@@ -50,9 +50,9 @@ class AgentState(BaseModel):
 class Agent:
     """LangGraph-based agent implementation with improved multi-hop planning and tool discovery"""
 
-    def __init__(self, llm_connector, mcp_client: MCPClient, debug=False):
+    def __init__(self, llm_connector, mcp_clients: Dict[str, MCPClient], debug=False):
         self.llm = llm_connector
-        self.mcp_client = mcp_client
+        self.mcp_clients = mcp_clients
         self.debug = debug
         self.conversation_history: List[Message] = []
 
@@ -133,29 +133,48 @@ class Agent:
         return graph
 
     def _initialize_context(self, state: AgentState) -> AgentState:
-        """Initialize the agent context with available tools and resources"""
-        logger.info("Initializing agent context")
+        """Initialize the agent context with available tools and resources from all MCP clients"""
+        logger.info("Initializing agent context from all MCP clients")
 
-        # Discover available tools and resources
-        try:
-            # Get available tools
-            tools_response = self.mcp_client.list_tools()
-            state.execution_context["available_tools"] = tools_response.get("tools", [])
+        # Initialize containers for tools and resources
+        state.execution_context["available_tools"] = []
+        state.available_schemas = []
+        state.execution_context["available_resources"] = []
+        state.execution_context["server_ids"] = list(self.mcp_clients.keys())
 
-            # Get available resources (schemas)
-            resources_response = self.mcp_client.list_resources()
-            state.available_schemas = resources_response.get("resources", [])
-            state.execution_context["available_resources"] = state.available_schemas
+        # Discover available tools and resources from all clients
+        for server_id, client in self.mcp_clients.items():
+            try:
+                # Get available tools from this client
+                tools_response = client.list_tools()
+                tools = tools_response.get("tools", [])
 
-            logger.debug(
-                "Initialized context with %d tools and %d resources",
-                len(state.execution_context.get("available_tools", [])),
-                len(state.available_schemas),
-            )
+                # Add server_id to each tool for identification
+                for tool in tools:
+                    tool["server_id"] = server_id
 
-        except Exception as e:
-            logger.error(f"Error initializing context: {e}", exc_info=self.debug)
-            state.error = f"Failed to initialize agent context: {e}"
+                state.execution_context["available_tools"].extend(tools)
+
+                # Get available resources (schemas) from this client
+                resources_response = client.list_resources()
+                resources = resources_response.get("resources", [])
+
+                # Add server_id to each resource for identification
+                for resource in resources:
+                    resource["server_id"] = server_id
+
+                state.available_schemas.extend(resources)
+                state.execution_context["available_resources"].extend(resources)
+
+                logger.debug(
+                    f"Initialized context from {server_id} with {len(tools)} tools and {len(resources)} resources"
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"Error initializing context from {server_id}: {e}", exc_info=self.debug
+                )
+                state.error = f"Failed to initialize agent context from {server_id}: {e}"
 
         return state
 
@@ -189,26 +208,37 @@ class Agent:
 
         # Prepare MCP tool information for the LLM prompt
         mcp_info = "Available Tool Servers:\n"
+        for server_id in state.execution_context.get("server_ids", []):
+            mcp_info += f"Server: {server_id}\n"
 
-        # Format tools information
-        tools = state.execution_context.get("available_tools", [])
-        if tools:
-            mcp_info += "Available Tools:\n"
-            for tool in tools:
-                schema_desc = (
-                    f" Requires input: {json.dumps(tool.get('inputSchema', {}))}"
-                    if tool.get("inputSchema")
-                    else ""
-                )
-                mcp_info += f"- Name: {tool.get('name', 'N/A')}, Description: {tool.get('description', 'N/A')}{schema_desc}\n"
-        else:
-            mcp_info += "No tools currently available.\n"
+            # Get tools for this server
+            tools = [
+                tool
+                for tool in state.execution_context.get("available_tools", [])
+                if tool.get("server_id") == server_id
+            ]
 
-        # Format schema information
-        if state.available_schemas:
-            mcp_info += "\nAvailable Data Resources:\n"
-            for res in state.available_schemas:
-                mcp_info += f"- {res.get('name', res.get('uri'))} (URI: {res.get('uri')})\n"
+            if tools:
+                mcp_info += "  Available Tools:\n"
+                for tool in tools:
+                    schema_desc = (
+                        f" Requires input: {json.dumps(tool.get('inputSchema', {}))}"
+                        if tool.get("inputSchema")
+                        else ""
+                    )
+                    mcp_info += f"  - Name: {tool.get('name', 'N/A')}, Description: {tool.get('description', 'N/A')}{schema_desc}\n"
+            else:
+                mcp_info += "  No tools currently available.\n"
+
+            # Format schema information for this server
+            resources = [
+                res for res in state.available_schemas if res.get("server_id") == server_id
+            ]
+
+            if resources:
+                mcp_info += "\n  Available Data Resources:\n"
+                for res in resources:
+                    mcp_info += f"  - {res.get('name', res.get('uri'))} (URI: {res.get('uri')})\n"
 
         # Format conversation history for the prompt
         conversation_context = self._format_conversation_history()
@@ -239,16 +269,22 @@ class Agent:
            - Always inspect resource URIs carefully to extract the correct schema name
            - Remember that a resource URI like "postgres://user@host:port/db/schema_name/table_name/schema" indicates the table is in schema "schema_name"
         
-        2. Multi-step reasoning:
+        2. For RAG-related queries:
+           - Use the 'rag_get_context' tool to retrieve relevant context chunks
+           - Use the 'rag_generate_completion' tool to generate completions with context
+        
+        3. Multi-step reasoning:
            - Break down complex queries into distinct stages
            - If information from one step is needed for another, plan the entire sequence
            - Don't leave follow-up actions implicit or for future steps
         
-        3. Error handling:
+        4. Error handling:
            - Consider alternative approaches if a primary action might fail
            - For database queries, plan fallback actions in case of schema or table name issues
         
-        IMPORTANT: Use previous conversations for context when relevant. If the user refers to previous queries or results, use that context in your planning.
+        IMPORTANT: 
+        - You MUST specify the server_id for each action (which server to use: "postgres" or "rag")
+        - Use previous conversations for context when relevant. If the user refers to previous queries or results, use that context in your planning.
 
         Format your response as JSON:
         {{
@@ -256,6 +292,7 @@ class Agent:
             "plan": "high-level plan description",
             "actions": [
                 {{
+                    "server_id": "postgres", // REQUIRED: Specify which server to use: postgres or rag
                     "mcp_method": "mcp_readResource", // or mcp_callTool, etc.
                     "params": {{ // Parameters for the MCP method
                         "uri": "postgres://..." // for readResource
@@ -299,10 +336,11 @@ class Agent:
             logger.info("Planned %d actions", action_count)
             for i, action in enumerate(state.planned_actions):
                 logger.debug(
-                    "Action %d: %s - %s",
+                    "Action %d: %s - %s - Server: %s",
                     i + 1,
                     action.get("mcp_method", "unknown"),
                     json.dumps(action.get("params", {}), default=str),
+                    action.get("server_id", "unknown"),
                 )
                 # Store reason if provided
                 if "reason" in action:
@@ -325,12 +363,38 @@ class Agent:
             return state
 
         action_spec = state.planned_actions[state.current_action_index]
+        server_id = action_spec.get("server_id")
         mcp_method = action_spec.get("mcp_method")
         params = action_spec.get("params", {})
 
+        # Validate we have a server_id
+        if not server_id:
+            error_msg = "Missing server_id in action specification"
+            logger.error(error_msg)
+            state.thoughts.append(f"Error: {error_msg}")
+            state.mcp_results[f"action_{state.current_action_index}_{mcp_method}"] = {
+                "error": error_msg
+            }
+            state.current_action_index += 1
+            return state
+
+        # Check if the server exists
+        if server_id not in self.mcp_clients:
+            error_msg = f"Unknown server_id: {server_id}"
+            logger.error(error_msg)
+            state.thoughts.append(f"Error: {error_msg}")
+            state.mcp_results[f"action_{state.current_action_index}_{mcp_method}"] = {
+                "error": error_msg
+            }
+            state.current_action_index += 1
+            return state
+
+        # Get the appropriate client
+        client = self.mcp_clients[server_id]
+
         # Create a shortened version for logging
         params_str = json.dumps(params, default=str)
-        action_label = f"{mcp_method}({params_str})"
+        action_label = f"{server_id}.{mcp_method}({params_str})"
 
         logger.info(
             "Executing action %d/%d: %s",
@@ -343,21 +407,23 @@ class Agent:
         result = None
         error_msg = None
         try:
-            # Use the MCPClient to execute the action
+            # Use the specific MCPClient to execute the action
             if mcp_method == "mcp_listResources":
-                result = self.mcp_client.list_resources()
+                result = client.list_resources()
             elif mcp_method == "mcp_readResource":
                 if "uri" not in params:
                     raise ValueError("Missing 'uri' parameter for readResource")
-                result = self.mcp_client.read_resource(uri=params["uri"])
+                result = client.read_resource(uri=params["uri"])
             elif mcp_method == "mcp_listTools":
-                result = self.mcp_client.list_tools()
+                result = client.list_tools()
             elif mcp_method == "mcp_callTool":
                 if "name" not in params:
                     raise ValueError("Missing 'name' parameter for callTool")
-                # Enhanced SQL handling for database queries
+
+                # Special handling for SQL queries (postgres server only)
                 if (
-                    params["name"] == "query"
+                    server_id == "postgres"
+                    and params["name"] == "query"
                     and "arguments" in params
                     and "sql" in params["arguments"]
                 ):
@@ -371,21 +437,23 @@ class Agent:
                         )
                         params["arguments"]["sql"] = enhanced_sql
 
-                result = self.mcp_client.call_tool(
-                    name=params["name"], arguments=params.get("arguments")
-                )
+                result = client.call_tool(name=params["name"], arguments=params.get("arguments"))
             else:
                 raise ValueError(f"Unsupported MCP method in plan: {mcp_method}")
 
-            logger.debug("MCP action execution successful via MCPClient")
-            state.thoughts.append(f"Action result: Successfully executed {mcp_method}")
+            logger.debug(f"MCP action execution successful via {server_id} client")
+            state.thoughts.append(f"Action result: Successfully executed {server_id}.{mcp_method}")
 
             # Store result with a unique key per action
-            action_key = f"action_{state.current_action_index}_{mcp_method}"
+            action_key = f"action_{state.current_action_index}_{server_id}_{mcp_method}"
             state.mcp_results[action_key] = result
 
             # For SQL queries, extract and store results in a more accessible format
-            if mcp_method == "mcp_callTool" and params["name"] == "query":
+            if (
+                server_id == "postgres"
+                and mcp_method == "mcp_callTool"
+                and params["name"] == "query"
+            ):
                 try:
                     # Extract actual data from the tool response
                     if "content" in result and result["content"]:
@@ -410,13 +478,11 @@ class Agent:
         except Exception as e:
             error_msg = str(e)
             logger.error(
-                "Error executing MCP action %s via MCPClient: %s",
-                mcp_method,
-                error_msg,
+                f"Error executing MCP action {server_id}.{mcp_method}: {error_msg}",
                 exc_info=self.debug,
             )
-            state.thoughts.append(f"Error executing {mcp_method}: {error_msg}")
-            action_key = f"action_{state.current_action_index}_{mcp_method}"
+            state.thoughts.append(f"Error executing {server_id}.{mcp_method}: {error_msg}")
+            action_key = f"action_{state.current_action_index}_{server_id}_{mcp_method}"
             state.mcp_results[action_key] = {"error": error_msg}
 
         # Advance to next action
@@ -439,8 +505,13 @@ class Agent:
         if not action_spec:
             return state
 
-        mcp_method = action_spec.get("mcp_method")
-        last_result_key = f"action_{last_action_index}_{mcp_method}"
+        server_id = action_spec.get("server_id", "")
+        mcp_method = action_spec.get("mcp_method", "")
+        last_result_key = f"action_{last_action_index}_{server_id}_{mcp_method}"
+
+        # If the key doesn't exist, try the old format without server_id
+        if last_result_key not in state.mcp_results:
+            last_result_key = f"action_{last_action_index}_{mcp_method}"
 
         # Check if the last action had an error
         last_result = state.mcp_results.get(last_result_key, {})
@@ -468,8 +539,12 @@ class Agent:
                 state.thoughts.append(f"Action failed with error: {error_msg}")
                 logger.debug(f"Identified error in result: {error_msg}")
 
-                # Check for specific SQL errors that suggest schema qualification issues
-                if "relation" in str(error_msg) and "does not exist" in str(error_msg):
+                # Check for specific SQL errors that suggest schema qualification issues (postgres only)
+                if (
+                    server_id == "postgres"
+                    and "relation" in str(error_msg)
+                    and "does not exist" in str(error_msg)
+                ):
                     state.execution_context["schema_qualification_needed"] = True
                     state.thoughts.append(
                         "The error suggests a relation/table was not found. May need schema qualification."
@@ -510,6 +585,9 @@ class Agent:
         1. Is there a schema qualification issue? 
         2. Are the table names correct?
         3. Does the query syntax need adjustments?
+        4. Are you using the correct server (postgres or rag) for this action?
+        
+        IMPORTANT: You MUST specify the server_id for each action.
         
         Format your response as JSON:
         {{
@@ -517,6 +595,7 @@ class Agent:
             "revised_plan": "description of the revised approach",
             "actions": [
                 {{
+                    "server_id": "postgres", // REQUIRED: Specify which server to use
                     "mcp_method": "mcp_method_name",
                     "params": {{ parameters }},
                     "reason": "why this action will resolve the issue"
@@ -563,6 +642,10 @@ class Agent:
         # Extract schema names from URIs for all tables
         schema_table_map = {}
         for resource in state.available_schemas:
+            # Only process postgres resources
+            if resource.get("server_id") != "postgres":
+                continue
+
             uri = resource.get("uri", "")
             # Extract schema and table from URI
             match = re.search(r"/([^/]+)/([^/]+)/schema", uri)
@@ -615,11 +698,14 @@ class Agent:
         2. Is the information complete or do we need more data?
         3. Can we now provide a final answer to the user?
         
+        IMPORTANT: You MUST specify the server_id for each action.
+        
         Format your response as JSON:
         {{
             "thought": "your reasoning here",
             "actions": [
                 {{
+                    "server_id": "postgres", // REQUIRED: Specify which server to use
                     "mcp_method": "method_name",
                     "params": {{ parameter details }},
                     "reason": "why this action is needed"
@@ -665,7 +751,7 @@ class Agent:
 
         # Enhanced prompt with better guidance for different MCP response types
         prompt = f"""
-        Based on the user's query and the results from interacting with the MCP tool server, generate a helpful response.
+        Based on the user's query and the results from interacting with multiple MCP tool servers, generate a helpful response.
 
         User query: {state.query}
         
@@ -681,14 +767,17 @@ class Agent:
         Instructions for response generation:
         1. Synthesize information from all MCP interactions to provide a complete answer
         2. If database queries were performed, present the results clearly 
-        3. If there were errors during execution, explain what happened and the resolution
-        4. Refer back to the user's original question to ensure all aspects are addressed
-        5. Use a friendly, informative tone
+        3. If RAG tools were used, incorporate the context and generated completions
+        4. If there were errors during execution, explain what happened and the resolution
+        5. Refer back to the user's original question to ensure all aspects are addressed
+        6. Use a friendly, informative tone
         
         Look for data in MCP results with these patterns:
         - `mcp_listResources` results contain a list of resources under the 'resources' key
         - `mcp_readResource` results contain file content under the 'contents[0].text' key (usually JSON schema)
         - `mcp_callTool` results with "query" tool contain data under 'content[0].text' (usually JSON result)
+        - `mcp_callTool` results for "rag_get_context" contain the retrieved context chunks
+        - `mcp_callTool` results for "rag_generate_completion" contain the generated completion
         
         If there were SQL results, extract the actual data values from the JSON in the response.
         """
@@ -741,12 +830,19 @@ class Agent:
         for i in range(state.current_action_index):
             if i < len(state.planned_actions):
                 action = state.planned_actions[i]
+                server_id = action.get("server_id", "unknown")
                 mcp_method = action.get("mcp_method", "unknown")
                 params = json.dumps(action.get("params", {}), default=str)
-                formatted += f"{i + 1}. {mcp_method} with params: {params}\n"
+                formatted += (
+                    f"{i + 1}. Server: {server_id}, Method: {mcp_method} with params: {params}\n"
+                )
 
                 # Add result if available
-                result_key = f"action_{i}_{mcp_method}"
+                result_key = f"action_{i}_{server_id}_{mcp_method}"
+                # Try old format if not found
+                if result_key not in state.mcp_results:
+                    result_key = f"action_{i}_{mcp_method}"
+
                 if result_key in state.mcp_results:
                     result = state.mcp_results[result_key]
                     result_str = str(result)
@@ -760,10 +856,18 @@ class Agent:
             return "No schema information available"
 
         formatted = ""
-        for res in state.available_schemas:
-            name = res.get("name", "")
-            uri = res.get("uri", "")
-            formatted += f"- {name} (URI: {uri})\n"
+        # Group by server
+        for server_id in state.execution_context.get("server_ids", []):
+            server_resources = [
+                res for res in state.available_schemas if res.get("server_id") == server_id
+            ]
+
+            if server_resources:
+                formatted += f"Server: {server_id}\n"
+                for res in server_resources:
+                    name = res.get("name", "")
+                    uri = res.get("uri", "")
+                    formatted += f"- {name} (URI: {uri})\n"
 
         return formatted
 
