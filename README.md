@@ -1,6 +1,6 @@
 # ConfidentialMind PostgreSQL Agent
 
-A powerful AI-powered agent that interfaces with PostgreSQL databases, enabling natural language interactions with your database. This agent uses the Model-Client-Protocol (MCP) architecture to provide a secure and flexible connection between LLMs and PostgreSQL databases.
+A powerful AI-powered agent that interfaces with PostgreSQL databases and RAG systems, enabling natural language interactions with your data. This agent uses the Model-Client-Protocol (MCP) architecture to provide a secure and flexible connection between LLMs, PostgreSQL databases, and RAG services.
 
 ## Overview
 
@@ -10,26 +10,30 @@ ConfidentialMind PostgreSQL Agent allows you to:
 - Explore database schema information
 - Execute SQL queries based on natural language instructions
 - Get results in a structured, easy-to-understand format
+- Retrieve relevant information from RAG systems
+- Combine database queries with RAG knowledge retrieval
 
-The agent uses a LangGraph-based workflow to process queries, plan actions, execute database operations, and generate human-friendly responses.
+The agent uses a LangGraph-based workflow to process queries, plan actions, execute database operations, retrieve information from RAG systems, and generate human-friendly responses.
 
 ## Architecture
 
 The system consists of the following components:
 
-1. **Main Application** (`postgres_integration.py`): Entry point that handles CLI arguments, sets up components, and provides an interactive query session.
+1. **Main Application** (`mcp_integration.py`): Entry point that handles CLI arguments, sets up components, and provides an interactive query session.
 
 2. **MCP Protocol** (`src/mcp/mcp_protocol.py`): Defines the JSON-RPC based protocol for communication.
 
-3. **MCP Client** (`src/mcp/mcp_client.py`): Client that communicates with the PostgreSQL MCP server.
+3. **MCP Client** (`src/mcp/mcp_client.py`): Client that communicates with the MCP servers.
 
 4. **PostgreSQL MCP Server** (`src/mcp/postgres_mcp_server.py`): Server that connects to a PostgreSQL database and provides MCP protocol access.
 
-5. **Agent Core** (`src/core/agent.py`): LangGraph-based workflow that processes queries, plans actions, and generates responses.
+5. **RAG MCP Server** (`src/mcp/rag_mcp_server.py`): Server that connects to a RAG service and provides MCP protocol access for knowledge retrieval.
 
-6. **LLM Connector** (`src/connectors/llm.py`): Handles communication with LLM APIs.
+6. **Agent Core** (`src/core/agent.py`): LangGraph-based workflow that processes queries, plans actions, and generates responses.
 
-7. **ConfidentialMind Integration** (`src/connectors/confidentialmind.py`): Optional integration with ConfidentialMind for enhanced security and management.
+7. **LLM Connector** (`src/connectors/llm.py`): Handles communication with LLM APIs.
+
+8. **ConfidentialMind Integration** (`src/connectors/confidentialmind.py`): Optional integration with ConfidentialMind for enhanced security and management.
 
 ## Installation
 
@@ -53,6 +57,10 @@ PG_CONNECTION_STRING="postgresql://username:password@hostname:5432/database"
 LLM_URL="http://localhost:8080/v1"  # Default
 LLM_API_KEY="your_api_key"  # Optional based on your LLM service
 
+# RAG API configuration
+RAG_API_URL="https://api.your-rag-service.com/v1/api/your-project-id"
+RAG_API_KEY="your-api-key-here"
+
 CONFIDENTIAL_MIND_LOCAL_CONFIG=true
 
 # Optional: Set to enable debug logging
@@ -67,10 +75,10 @@ You can create a `.env` file to store these variables.
 
 ```bash
 # Run interactive mode using environment variables for configuration
-python postgres_integration.py
+python mcp_integration.py
 
 # Run a single query
-python postgres_integration.py --query "What tables do I have in my database?"
+python mcp_integration.py --query "What tables do I have in my database?"
 ```
 
 ### Example Queries
@@ -87,6 +95,10 @@ Show me the top 5 users with the most orders
 
 # Data analysis
 What is the average order value in the last week?
+
+# RAG queries
+What information do we have about customer satisfaction?
+Find documents related to our return policy.
 ```
 
 ## Development
@@ -123,26 +135,30 @@ The agent uses a Model-Client-Protocol architecture:
 
 1. **MCP Protocol**: JSON-RPC 2.0 based protocol that defines four key methods:
 
-   - `mcp_listResources`: Lists available resources (database tables)
-   - `mcp_readResource`: Reads a specific resource (table schema)
-   - `mcp_listTools`: Lists available tools (SQL query execution)
-   - `mcp_callTool`: Executes a tool (runs a SQL query)
+   - `mcp_listResources`: Lists available resources (database tables, RAG collections)
+   - `mcp_readResource`: Reads a specific resource (table schema, RAG collection details)
+   - `mcp_listTools`: Lists available tools (SQL query execution, RAG document retrieval)
+   - `mcp_callTool`: Executes a tool (runs a SQL query, retrieves relevant documents)
 
-2. **MCP Client**: Manages communication with the MCP server, handling request/response cycles.
+2. **MCP Client**: Manages communication with the MCP servers, handling request/response cycles.
 
-3. **MCP Server**: Connects to PostgreSQL and implements the MCP protocol, providing access to database functionality.
+3. **PostgreSQL MCP Server**: Connects to PostgreSQL and implements the MCP protocol, providing access to database functionality.
+
+4. **RAG MCP Server**: Connects to a RAG service and implements the MCP protocol, providing access to document retrieval functionality.
 
 ### Agent Workflow
 
 The agent uses a LangGraph-based workflow:
 
 1. **Parse Query**: Analyzes the natural language query to determine required actions
-2. **Execute MCP Actions**: Executes MCP operations (list resources, read schemas, execute queries)
-3. **Generate Response**: Synthesizes results into a human-friendly response
+2. **Execute MCP Actions**: Executes MCP operations (list resources, read schemas, execute queries, retrieve documents)
+3. **Combine Results**: Integrates results from both database queries and RAG document retrieval
+4. **Generate Response**: Synthesizes combined results into a comprehensive human-friendly response
 
 ## Requirements
 
 - Python 3.10 or higher
 - PostgreSQL database
 - Access to an LLM API service (local or remote)
+- Access to a RAG API service
 - ConfidentialMind account (optional)
