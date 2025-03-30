@@ -46,25 +46,28 @@ def create_mcp_client() -> MCPClient:
         raise ValueError("PG_CONNECTION_STRING must be set in the environment.")
 
     # Define the command to run the MCP server
-    # Adjust path relative to this script if needed
+    # First check the expected path relative to this script
     server_script_path = os.path.join(
         os.path.dirname(__file__), "src", "mcp", "postgres_mcp_server.py"
     )
     if not os.path.exists(server_script_path):
-        logger.warning(f"MCP server script not found at default path: {server_script_path}")
-        # Attempt fallback assuming it's in the same directory or PATH accessible
-        server_script_path = "postgres_mcp_server.py"  # Adjust if necessary
+        # Then check alternative paths
+        for alt_path in ["src/mcp/postgres_mcp_server.py", "postgres_mcp_server.py"]:
+            if os.path.exists(alt_path):
+                server_script_path = alt_path
+                break
+        else:
+            logger.warning(f"MCP server script not found at any expected path")
+            # Proceed with the original path as a last resort
+            server_script_path = "postgres_mcp_server.py"
 
-    server_command = (
-        f"{sys.executable} {server_script_path} {postgres_conn_string}"  # Do not quote connection string
-    )
+    server_command = f"{sys.executable} {server_script_path} {postgres_conn_string}"
 
     try:
         logger.info("Initializing MCPClient...")
         # Create and store the client instance globally for cleanup
         mcp_client_instance = MCPClient(server_command=server_command)
         logger.info("MCPClient initialized and server process start initiated.")
-        # Note: MCPClient constructor attempts to start the server. Error handling is inside MCPClient.
         return mcp_client_instance
     except Exception as e:
         logger.error(f"FATAL: Failed to initialize MCPClient: {e}", exc_info=True)
@@ -77,8 +80,7 @@ def setup_with_env_vars() -> Agent:
     """Set up agent using environment variables for LLM and MCPClient for tools."""
     logger.info("Setting up Agent using environment variables for LLM connector.")
 
-    # 1. LLM Connector Setup from Environment Variables (Keep your multi-LLM logic if needed)
-    # Simplified version:
+    # 1. LLM Connector Setup from Environment Variables
     llm_url = os.environ.get("LLM_URL", "http://localhost:8080/v1")
     llm_api_key = os.environ.get("LLM_API_KEY", "")
     llm_connector = LLMConnector(
@@ -175,14 +177,13 @@ def run_interactive_session(agent: Agent) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="PostgreSQL MCP integration example")
-    parser.add_argument(
-        "--mode",
-        choices=["env", "cm"],
-        default="env",
-        help="Configuration mode: 'env' (use environment variables for LLM) or 'cm' (use ConfidentialMind for LLM).",
-    )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--query", help="Query to run (non-interactive)")
     args = parser.parse_args()
+
+    # Set log level based on debug flag
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     agent = None
     try:
@@ -192,7 +193,7 @@ def main():
         logger.error(f"Failed to set up agent: {setup_error}", exc_info=True)
         print(f"\nError during setup: {setup_error}")
         print(
-            "Please check your configuration (environment variables, CM setup, installed packages) and try again."
+            "Please check your configuration (environment variables, installed packages) and try again."
         )
         sys.exit(1)
     except Exception as e:  # Catch any other unexpected setup errors

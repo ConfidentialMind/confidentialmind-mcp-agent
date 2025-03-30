@@ -5,7 +5,7 @@ import queue
 import subprocess
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.mcp.mcp_protocol import JsonRpcRequest, JsonRpcResponse
 
@@ -15,6 +15,8 @@ logging.basicConfig(
 
 
 class MCPClient:
+    """Connector for MCP-compliant tool servers"""
+
     def __init__(self, server_command: str, server_env: Optional[Dict[str, str]] = None):
         self.server_command = server_command.split()  # Split command string into list
         self.server_env = {**os.environ, **(server_env or {})}  # Merge env vars
@@ -23,9 +25,18 @@ class MCPClient:
         self._response_queue = queue.Queue()
         self._listener_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-        self.start_server()
 
-    def start_server(self):
+        # Use a timeout for initial startup
+        self._init_failed = False
+        try:
+            # Start the server with a timeout to prevent hanging
+            self.start_server(timeout=10)
+        except Exception as e:
+            logging.error(f"Server startup error: {e}", exc_info=True)
+            self._init_failed = True
+            # Continue running - we'll attempt to start the server on first request
+
+    def start_server(self, timeout=30):
         with self._lock:
             if self._process and self._process.poll() is None:
                 logging.warning("Server process already running.")
@@ -43,13 +54,23 @@ class MCPClient:
                     encoding="utf-8",
                     env=self.server_env,
                 )
-                # Give server a moment to start
-                time.sleep(1)
-                if self._process.poll() is not None:
-                    stderr_output = self._process.stderr.read() if self._process.stderr else "N/A"
-                    raise RuntimeError(
-                        f"Server process failed to start. Exit code: {self._process.returncode}. Stderr:\n{stderr_output}"
-                    )
+
+                # Wait for the process with timeout
+                start_time = time.time()
+                while time.time() - start_time < timeout:
+                    if self._process.poll() is not None:
+                        # Process exited
+                        stderr_output = (
+                            self._process.stderr.read() if self._process.stderr else "N/A"
+                        )
+                        raise RuntimeError(
+                            f"Server process failed to start. Exit code: {self._process.returncode}. Stderr:\n{stderr_output}"
+                        )
+                    time.sleep(0.1)
+
+                    # If we've waited at least 1 second, assume the process is stable
+                    if time.time() - start_time > 1:
+                        break
 
                 self._listener_thread = threading.Thread(
                     target=self._listen_for_responses, daemon=True
@@ -111,14 +132,16 @@ class MCPClient:
                 logging.debug("Stderr thread is daemon, will exit with main process.")
 
     def _send_request(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        """Send a request to the MCP server"""
         with self._lock:
-            if not self._process or self._process.poll() is not None:
-                logging.error("Server process is not running. Attempting restart.")
-                self.start_server()  # Attempt restart
-                if not self._process or self._process.poll() is not None:
-                    raise RuntimeError(
-                        "MCP Server process is not running and could not be restarted."
-                    )
+            # If initialization failed or server is not running, attempt to restart
+            if self._init_failed or not self._process or self._process.poll() is not None:
+                logging.warning("Server process is not running. Attempting restart.")
+                try:
+                    self.start_server()
+                    self._init_failed = False
+                except Exception as e:
+                    raise RuntimeError(f"Failed to start MCP server: {e}")
 
             self._request_id_counter += 1
             request_id = self._request_id_counter
@@ -166,7 +189,7 @@ class MCPClient:
         logging.error(f"Timeout waiting for response for request ID {request_id}")
         raise TimeoutError(f"Timeout waiting for MCP server response (ID: {request_id})")
 
-    # --- Convenience methods for MCP calls ---
+    # --- Convenience methods for MCP calls (unchanged from original) ---
 
     def list_resources(self) -> Dict[str, Any]:
         return self._send_request("mcp_listResources")
