@@ -1,10 +1,10 @@
-# ConfidentialMind PostgreSQL Agent
+# ConfidentialMind MCP Agent
 
 A powerful AI-powered agent that interfaces with PostgreSQL databases and RAG systems, enabling natural language interactions with your data. This agent uses the Model-Client-Protocol (MCP) architecture to provide a secure and flexible connection between LLMs, PostgreSQL databases, and RAG services.
 
 ## Overview
 
-ConfidentialMind PostgreSQL Agent allows you to:
+ConfidentialMind MCP Agent allows you to:
 
 - Query PostgreSQL databases using natural language
 - Explore database schema information
