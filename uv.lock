@@ -227,7 +227,7 @@ wheels = [
 ]
 
 [[package]]
-name = "confidentialmind-postgres-agent"
+name = "confidentialmind-mcp-agent"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
