@@ -42,7 +42,7 @@ class MCPClient:
                 logging.warning("Server process already running.")
                 return
 
-            logging.info(f"Starting MCP server: {' '.join(self.server_command)}")
+            logging.info(f"Starting MCP server: {' '.join(self.server_command)[:100]}...")
             try:
                 self._process = subprocess.Popen(
                     self.server_command,
