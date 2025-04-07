@@ -113,24 +113,11 @@ What information do we have about customer satisfaction?
 Find documents related to our return policy.
 ```
 
-## Development
+## Notes
 
-```bash
-# Format code
-black . && isort .
-
-# Lint
-ruff check .
-
-# Type check
-mypy .
-
-# Run tests
-pytest
-
-# Run specific test
-pytest tests/path/to/test_file.py::test_function -v
-```
+- You may find the agent to sometimes fail depending on the model. It may even need a bit of pushing and prompt engineering to complete the query.
+- Llama 70B seems to work pretty well.
+- Some hackathon ideas include building your own MCP tool server or modifying the agent workflow.
 
 ## Security Considerations
 
@@ -143,7 +130,7 @@ pytest tests/path/to/test_file.py::test_function -v
 
 ### MCP Protocol
 
-The agent uses a Model-Client-Protocol architecture:
+The agent uses MCP architecture:
 
 1. **MCP Protocol**: JSON-RPC 2.0 based protocol that defines four key methods:
 
