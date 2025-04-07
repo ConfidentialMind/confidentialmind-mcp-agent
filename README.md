@@ -38,11 +38,18 @@ The system consists of the following components:
 ## Installation
 
 ```bash
+# Install uv (https://docs.astral.sh/uv/getting-started/installation/)
+## MacOS & Linux
+curl -LsSf https://astral.sh/uv/install.sh | less
+
+# Create virtual environment with uv
+uv venv --python 3.12.9
+
+# Activate environment
+source .venv/bin/activate
+
 # Install dependencies
 uv pip install -e .
-
-# Install optional dependencies (recommended for development)
-uv pip install python-dotenv
 ```
 
 ## Configuration
@@ -54,7 +61,7 @@ The agent requires the following environment variables:
 PG_CONNECTION_STRING="postgresql://username:password@hostname:5432/database"
 
 # LLM API configuration
-LLM_URL="http://localhost:8080/v1"  # Default
+LLM_URL="https://api.your-model-service.com/v1/api/your-model-id"
 LLM_API_KEY="your_api_key"  # Optional based on your LLM service
 
 # RAG API configuration
@@ -68,6 +75,11 @@ DEBUG=true
 ```
 
 You can create a `.env` file to store these variables.
+Optionally, you can copy the example .env file.
+
+```bash
+cp .env.example .env
+```
 
 ## Usage
 
@@ -150,10 +162,15 @@ The agent uses a Model-Client-Protocol architecture:
 
 The agent uses a LangGraph-based workflow:
 
-1. **Parse Query**: Analyzes the natural language query to determine required actions
-2. **Execute MCP Actions**: Executes MCP operations (list resources, read schemas, execute queries, retrieve documents)
-3. **Combine Results**: Integrates results from both database queries and RAG document retrieval
-4. **Generate Response**: Synthesizes combined results into a comprehensive human-friendly response
+1. **Initialize Context**: Discovers available tools and resources from all connected MCP services
+2. **Parse Query**: Analyzes the natural language query to determine required actions and creates a multi-step plan
+3. **Execute MCP Actions**: Executes operations through appropriate MCP clients (reading schemas, running queries, retrieving documents)
+4. **Evaluate Results**: Assesses each action's outcome to determine if more actions are needed or if replanning is required
+5. **Replan Actions** (when needed): Revises the plan based on execution results, handling errors like missing schema qualifications
+6. **Plan Follow-up** (when needed): Plans additional actions if more information is needed to fully answer the query
+7. **Generate Response**: Synthesizes all gathered information into a comprehensive human-friendly response
+
+This workflow supports multi-hop reasoning and can adapt to execution failures with intelligent replanning.
 
 ## Requirements
 
@@ -161,4 +178,4 @@ The agent uses a LangGraph-based workflow:
 - PostgreSQL database
 - Access to an LLM API service (local or remote)
 - Access to a RAG API service
-- ConfidentialMind account (optional)
+- ConfidentialMind account
