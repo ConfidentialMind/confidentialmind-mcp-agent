@@ -1,50 +1,34 @@
-# Building a Custom MCP Tool Server (Hackathon Guide)
+# Building a Simple Weather MCP Server (Hackathon Guide)
 
-This guide provides a quick, step-by-step process for creating your own custom MCP (Model-Client Protocol) tool server based on the existing framework in this repository. This is ideal for quickly integrating a new tool or data source during a hackathon.
+This guide shows how to create a simple MCP tool server that provides weather information. Users will be able to ask for weather by city name, and your server will handle all the complexity behind the scenes.
 
-## Goal
+## What We'll Build
 
-To create a new Python script (e.g., `src/mcp/my_custom_mcp_server.py`) that acts as an MCP server for a specific service (like a weather API, a different database, a custom API, etc.) and integrate it into the main `mcp_integration.py` application.
+A simple MCP server that:
 
-## Core Concepts
+1. Accepts a city name as input
+2. Performs geocoding (converting city to coordinates) automatically
+3. Fetches current weather and forecasts
+4. Returns a nicely formatted response
 
-- **MCP Protocol (`mcp_protocol.py`):** Defines the standard JSON-RPC messages (like `listTools`, `callTool`) used for communication. You'll use the Pydantic models defined here.
-- **MCP Client (`mcp_client.py`):** The main application uses this client to start and communicate with your MCP server process via standard input/output. You generally don't need to modify this.
-- **MCP Server (Your Script):** A standalone Python script that:
-  - Listens for JSON-RPC requests on `stdin`.
-  - Processes requests based on the MCP protocol (e.g., listing available tools, executing a tool).
-  - Sends JSON-RPC responses back via `stdout`.
-- **Handler Class (In Your Script):** Contains the core logic for interacting with your target service (e.g., calling an API, querying a database) and mapping it to MCP methods.
-- **Integration (`mcp_integration.py`):** Needs minor additions to know how to start and use your new MCP server based on environment variables.
+## Prerequisites
 
-## Steps
+- Python 3.8+
+- An OpenWeatherMap API key ([sign up here](https://home.openweathermap.org/users/sign_up))
+- Basic understanding of HTTP requests and JSON
 
-### 1. Define Your Service & Tools
+## Step 1: Create Your Server File
 
-- **What service will your server connect to?** (e.g., OpenWeatherMap API, a specific internal API, another database type).
-- **What specific actions (tools) should the LLM be able to trigger?** (e.g., `get_current_weather`, `lookup_user_data`, `query_vector_db`).
-- **What information (resources) might the LLM need to know about?** (e.g., available API endpoints, database table schemas - though often tools are sufficient).
-
-### 2. Create Your Server File
-
-- **Copy an existing server:** Duplicate `src/mcp/postgres_mcp_server.py` or `src/mcp/rag_mcp_server.py` and rename it (e.g., `src/mcp/weather_mcp_server.py`). This gives you the basic structure.
-- **Clear out specifics:** Remove the PostgreSQL or RAG-specific logic from the copied file's Handler class (e.g., `PostgresHandler`, `RAGHandler`).
-
-### 3. Implement Your Handler Class
-
-- **Rename the Handler:** Rename the class (e.g., `WeatherHandler`).
-- **`__init__`:** Modify the constructor to accept necessary configuration passed from the command line (like API keys, base URLs). Store these in instance variables.
+Create a new file `src/mcp/weather_mcp_server.py` with the basic structure:
 
 ```python
 import json
 import logging
 import sys
-from typing import Any, Dict, Optional
+from typing import Optional
 
-import requests  # Or other relevant libraries
-
-# Import necessary models from mcp_protocol
-from src.mcp.mcp_protocol import (
+import requests
+from mcp_protocol import (
     CallToolRequestParams,
     CallToolResponse,
     JsonRpcRequest,
@@ -54,230 +38,205 @@ from src.mcp.mcp_protocol import (
     ReadResourceRequestParams,
     ReadResourceResponse,
     ResourceContent,
-    ResourceIdentifier,
     TextContent,
     ToolDefinition,
     ToolInputSchema,
 )
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [Weather MCP Server] %(levelname)s: %(message)s"
+)
+
 class WeatherHandler:
-    def __init__(self, api_key: str, base_url: str = "https://api.openweathermap.org/data/2.5"):
+    def __init__(self, api_key: str, base_url: str = "https://api.openweathermap.org"):
         self.api_key = api_key
         self.base_url = base_url
-        self.headers = {"Accept": "application/json"}  # Example
         logging.info(f"Initialized WeatherHandler with base URL: {self.base_url}")
         if not api_key:
-             logging.warning("API Key not provided for WeatherHandler")
-             # Decide how to handle missing keys - maybe raise error or operate without auth if possible
+            logging.warning("API Key not provided for WeatherHandler")
+            raise ValueError("API key is required for the Weather MCP server")
 ```
 
-- **`handle_list_tools`:** Define the tools your server provides. Use `ToolDefinition` and `ToolInputSchema` from `mcp_protocol.py`.
+## Step 2: Implement Tool Definition
+
+Add the method to handle listing available tools:
 
 ```python
 def handle_list_tools(self) -> ListToolsResponse:
-    logging.info("Handling mcp_listTools for Weather Service")
+    """Provide tool definitions for weather operations"""
+    logging.info("Handling mcp_listTools")
     return ListToolsResponse(
         tools=[
             ToolDefinition(
-                name="get_current_weather",
-                description="Gets the current weather for a specified city.",
+                name="get_weather",
+                description="Gets current weather and forecast for a city.",
                 inputSchema=ToolInputSchema(
                     type="object",
                     properties={
                         "city": {
                             "type": "string",
-                            "description": "The name of the city (e.g., London, Tokyo).",
+                            "description": "The name of the city (e.g., London, Tokyo, New York).",
                         },
-                         "units": {
+                        "units": {
                             "type": "string",
                             "description": "Units for temperature (metric, imperial, standard). Default: metric.",
                         },
                     },
                     required=["city"],
                 ),
-            )
-            # Add more ToolDefinitions here if needed
+            ),
         ]
     )
 ```
 
-- **`handle_call_tool`:** Implement the logic to execute your defined tools.
-  - Check `params.name` to see which tool was called.
-  - Extract arguments from `params.arguments`.
-  - Call your target service (e.g., make an API request).
-  - Format the result according to `CallToolResponse` (usually using `TextContent`). Handle errors gracefully.
+## Step 3: Implement Tool Execution
+
+Add the method to handle tool execution:
 
 ```python
 def handle_call_tool(self, params: CallToolRequestParams) -> CallToolResponse:
+    """Handle weather-related tool calls with city name input"""
     logging.info(f"Handling mcp_callTool for tool: {params.name}")
 
-    if params.name == "get_current_weather":
+    if params.name == "get_weather":
         if not params.arguments or "city" not in params.arguments:
-            raise ValueError("Missing 'city' argument for 'get_current_weather'")
+            raise ValueError("Missing 'city' argument for 'get_weather' tool")
 
         city = params.arguments["city"]
         units = params.arguments.get("units", "metric")  # Default to metric
 
         try:
-            api_endpoint = f"{self.base_url}/weather"
-            query_params = {
+            # Step 1: Convert city to coordinates using the Geocoding API
+            logging.info(f"Converting city name to coordinates: {city}")
+            geo_url = "http://api.openweathermap.org/geo/1.0/direct"
+            geo_params = {
                 "q": city,
-                "appid": self.api_key,
-                "units": units,
+                "limit": 1,
+                "appid": self.api_key
             }
-            response = requests.get(api_endpoint, params=query_params, headers=self.headers, timeout=10)
-            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
 
-            weather_data = response.json()
-            # Format the relevant data nicely for the LLM
-            result_text = json.dumps({
-                "city": weather_data.get("name"),
-                "description": weather_data["weather"][0]["description"],
-                "temperature": weather_data["main"]["temp"],
-                "feels_like": weather_data["main"]["feels_like"],
-                "humidity": weather_data["main"]["humidity"],
-                "wind_speed": weather_data["wind"]["speed"],
-            }, indent=2)
+            geo_response = requests.get(geo_url, params=geo_params, timeout=10)
+            geo_response.raise_for_status()
 
-            logging.info(f"Successfully retrieved weather for {city}")
-            return CallToolResponse(content=[TextContent(text=result_text)], isError=False)
+            locations = geo_response.json()
+            if not locations:
+                return CallToolResponse(
+                    content=[TextContent(text=f"City not found: {city}")],
+                    isError=True
+                )
+
+            # Get coordinates from first result
+            lat = locations[0]["lat"]
+            lon = locations[0]["lon"]
+            actual_city_name = locations[0].get("name", city)
+            country = locations[0].get("country", "")
+
+            # Step 2: Fetch weather data with the coordinates
+            weather_url = f"{self.base_url}/data/3.0/onecall"
+            weather_params = {
+                "lat": lat,
+                "lon": lon,
+                "units": units,
+                "exclude": "minutely",  # Exclude minutely data
+                "appid": self.api_key
+            }
+
+            weather_response = requests.get(weather_url, params=weather_params, timeout=15)
+            weather_response.raise_for_status()
+
+            weather_data = weather_response.json()
+
+            # Step 3: Format the data in a simple structure
+            temp_unit = "°C" if units == "metric" else "°F" if units == "imperial" else "K"
+            speed_unit = "m/s" if units == "metric" else "mph" if units == "imperial" else "m/s"
+
+            current = weather_data.get("current", {})
+            weather_desc = current.get("weather", [{}])[0].get("description", "unknown") if current.get("weather") else "unknown"
+
+            # Create a simple weather summary
+            formatted_data = {
+                "location": f"{actual_city_name}, {country}",
+                "current_weather": {
+                    "temperature": f"{current.get('temp')} {temp_unit}",
+                    "feels_like": f"{current.get('feels_like')} {temp_unit}",
+                    "description": weather_desc,
+                    "humidity": f"{current.get('humidity')}%",
+                    "wind_speed": f"{current.get('wind_speed')} {speed_unit}",
+                    "cloud_coverage": f"{current.get('clouds')}%"
+                },
+                "forecast": []
+            }
+
+            # Add daily forecast for next 3 days
+            for day in weather_data.get("daily", [])[:3]:
+                from datetime import datetime
+                day_date = datetime.fromtimestamp(day.get("dt", 0)).strftime("%A, %b %d")
+                day_weather = day.get("weather", [{}])[0].get("description", "unknown") if day.get("weather") else "unknown"
+
+                forecast_day = {
+                    "date": day_date,
+                    "min_temp": f"{day.get('temp', {}).get('min')} {temp_unit}",
+                    "max_temp": f"{day.get('temp', {}).get('max')} {temp_unit}",
+                    "description": day_weather,
+                    "chance_of_rain": f"{int(day.get('pop', 0) * 100)}%"
+                }
+                formatted_data["forecast"].append(forecast_day)
+
+            result_json = json.dumps(formatted_data, indent=2)
+            return CallToolResponse(content=[TextContent(text=result_json)], isError=False)
 
         except requests.exceptions.RequestException as e:
-            logging.error(f"API call failed for get_current_weather: {e}", exc_info=True)
-            error_msg = f"API Error: Failed to get weather for {city}. Details: {str(e)}"
-            # Try to get more specific error from response if available
-            if hasattr(e, 'response') and e.response is not None:
-                 try:
-                     error_detail = e.response.json().get('message', e.response.text)
-                     error_msg = f"API Error ({e.response.status_code}): {error_detail}"
-                 except json.JSONDecodeError:
-                     error_msg = f"API Error ({e.response.status_code}): {e.response.text}"
-
+            error_msg = f"Weather API Error: {str(e)}"
+            logging.error(error_msg, exc_info=True)
             return CallToolResponse(content=[TextContent(text=error_msg)], isError=True)
-        except Exception as e:
-             logging.error(f"Unexpected error in get_current_weather: {e}", exc_info=True)
-             return CallToolResponse(content=[TextContent(text=f"Unexpected Server Error: {str(e)}")], isError=True)
 
+        except Exception as e:
+            error_msg = f"Error fetching weather: {str(e)}"
+            logging.error(error_msg, exc_info=True)
+            return CallToolResponse(content=[TextContent(text=error_msg)], isError=True)
     else:
         # Handle unknown tools
         raise ValueError(f"Unknown tool requested: {params.name}")
 ```
 
-- **`handle_list_resources` / `handle_read_resource`:** Implement these if your service has discoverable resources. For many API-based tools, you might just return empty or minimal responses.
+## Step 4: Implement Resource Handlers
+
+Add simple implementations for resource listing and reading:
 
 ```python
 def handle_list_resources(self) -> ListResourcesResponse:
-    """
-    For a Weather API, there might not be traditional resources to list.
-    You could return empty or provide available endpoints as resources.
-    """
-    logging.info("Handling mcp_listResources for Weather Service")
+    """List available resources (minimal for weather API)"""
+    logging.info("Handling mcp_listResources")
+    return ListResourcesResponse(resources=[])  # No browsable resources needed
 
-    # Example: List available resource endpoints
-    return ListResourcesResponse(
-        resources=[
-            ResourceIdentifier(
-                uri="weather://api.openweathermap.org/current",
-                name="Current Weather Data",
-                mimeType="application/json"
-            ),
-            ResourceIdentifier(
-                uri="weather://api.openweathermap.org/forecast",
-                name="5-day Weather Forecast",
-                mimeType="application/json"
+def handle_read_resource(self, params: ReadResourceRequestParams) -> ReadResourceResponse:
+    """Read resources (minimal for weather API)"""
+    logging.info(f"Handling mcp_readResource for URI: {params.uri}")
+    return ReadResourceResponse(
+        contents=[
+            ResourceContent(
+                uri=params.uri,
+                text="Resource reading is not supported by the Weather MCP server.",
+                mimeType="text/plain",
             )
         ]
     )
-
-def handle_read_resource(self, params: ReadResourceRequestParams) -> ReadResourceResponse:
-    """
-    Read specific resource information based on URI.
-    For APIs, this could provide documentation about endpoints.
-    """
-    logging.info(f"Handling mcp_readResource for URI: {params.uri}")
-
-    uri = params.uri
-    if "current" in uri:
-        # Return documentation about the current weather endpoint
-        content = json.dumps({
-            "endpoint": "/weather",
-            "parameters": {
-                "q": "City name (required)",
-                "units": "Units (metric, imperial, standard)",
-                "lang": "Language code"
-            },
-            "description": "Gets current weather for a specific location"
-        }, indent=2)
-
-        return ReadResourceResponse(
-            contents=[
-                ResourceContent(
-                    uri=uri,
-                    text=content,
-                    mimeType="application/json"
-                )
-            ]
-        )
-    elif "forecast" in uri:
-        # Return documentation about the forecast endpoint
-        content = json.dumps({
-            "endpoint": "/forecast",
-            "parameters": {
-                "q": "City name (required)",
-                "units": "Units (metric, imperial, standard)",
-                "cnt": "Number of timestamps to return"
-            },
-            "description": "Gets 5-day forecast for a specific location"
-        }, indent=2)
-
-        return ReadResourceResponse(
-            contents=[
-                ResourceContent(
-                    uri=uri,
-                    text=content,
-                    mimeType="application/json"
-                )
-            ]
-        )
-    else:
-        return ReadResourceResponse(
-            contents=[
-                ResourceContent(
-                    uri=uri,
-                    text="Resource not found or not supported.",
-                    mimeType="text/plain"
-                )
-            ]
-        )
 ```
 
-- **Resource Cleanup:** If your service requires connection cleanup (like database connections), implement a `close()` method that will be called when the server shuts down.
+## Step 5: Set Up the Server Loop
+
+Add the main server loop and command-line interface:
 
 ```python
-def close(self):
-    """Clean up any persistent connections or resources."""
-    logging.info("Cleaning up Weather handler resources")
-    # Example: close persistent connections if applicable
-    # self.session.close()
-```
-
-### 4. Adapt the Server Loop (`if __name__ == "__main__":`)
-
-- Modify the argument parsing (`sys.argv`) at the bottom of your server file to accept the configuration your Handler needs (e.g., API key, URL).
-- Instantiate your Handler with these arguments.
-- Keep the `run_server` function largely the same, ensuring it calls your Handler's methods.
-
-```python
-# In your src/mcp/weather_mcp_server.py (at the bottom)
-
 def run_server(api_key: str, base_url: Optional[str] = None):
-    # Pass arguments to your handler
+    """Run the Weather MCP server"""
     handler_args = {"api_key": api_key}
     if base_url:
         handler_args["base_url"] = base_url
-    handler = WeatherHandler(**handler_args)
 
+    handler = WeatherHandler(**handler_args)
     logging.info("Weather MCP Server Ready. Waiting for JSON-RPC requests on stdin...")
+
     try:
         while True:
             line = sys.stdin.readline()
@@ -334,49 +293,25 @@ def run_server(api_key: str, base_url: Optional[str] = None):
 
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt received, shutting down.")
-    finally:
-        # Call close() if implemented to clean up resources
-        if hasattr(handler, 'close'):
-            handler.close()
-        logging.info("Server shutdown complete.")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:  # Expecting at least the API Key
+    if len(sys.argv) < 2:
         print("Usage: python weather_mcp_server.py <api_key> [base_url]", file=sys.stderr)
         sys.exit(1)
 
     api_key_arg = sys.argv[1]
-    base_url_arg = sys.argv[2] if len(sys.argv) > 2 else None  # Optional base URL
+    base_url_arg = sys.argv[2] if len(sys.argv) > 2 else None
 
     run_server(api_key_arg, base_url_arg)
 ```
 
-### 5. Integrate with mcp_integration.py
+## Step 6: Integrate with mcp_integration.py
 
-- **Add Environment Variables:** Decide on environment variable names for your server's configuration (e.g., WEATHER_API_KEY, WEATHER_API_URL). Add these to your `.env` file.
+Now let's add the code to `mcp_integration.py` to create and manage your Weather MCP client:
 
-```
-# Example .env file entries for Weather MCP server
-WEATHER_API_KEY=your_openweathermap_api_key
-WEATHER_API_URL=https://api.openweathermap.org/data/2.5  # Optional, default in code
-
-# Other existing variables
-PG_CONNECTION_STRING=postgresql://username:password@hostname:5432/database
-LLM_URL=http://localhost:8080/v1
-LLM_API_KEY=your_llm_api_key
-RAG_API_URL=https://api.your-rag-service.com/v1/api/your-project-id
-RAG_API_KEY=your-api-key-here
-```
-
-- **Create Client Function:** Add a new function `create_weather_mcp_client` (or similar) in `mcp_integration.py`. This function should:
-  - Read the necessary environment variables.
-  - Construct the server_command string to run your new server script with the required arguments (e.g., API key).
-  - Instantiate and return `MCPClient(server_command=server_command)`.
-  - Add the client instance to the global `mcp_client_instances` dictionary for cleanup.
+1. Add a new function to create the Weather MCP client:
 
 ```python
-# In mcp_integration.py
-
 def create_weather_mcp_client() -> MCPClient:
     """Creates and starts the MCPClient for the Weather server."""
     global mcp_client_instances
@@ -389,11 +324,9 @@ def create_weather_mcp_client() -> MCPClient:
         logger.error("FATAL: WEATHER_API_KEY environment variable is not set.")
         raise ValueError("WEATHER_API_KEY must be set in the environment.")
 
-    weather_base_url = os.environ.get("WEATHER_API_URL")  # Optional
-
     # Define the command to run the MCP server
     server_script_path = os.path.join(os.path.dirname(__file__), "src", "mcp", "weather_mcp_server.py")
-    # Add fallback path checking similar to other clients
+    # Add fallback path checking
     if not os.path.exists(server_script_path):
         # Check alternative paths
         for alt_path in ["src/mcp/weather_mcp_server.py", "weather_mcp_server.py"]:
@@ -406,8 +339,6 @@ def create_weather_mcp_client() -> MCPClient:
             server_script_path = "weather_mcp_server.py"
 
     server_command = f"{sys.executable} {server_script_path} {weather_api_key}"
-    if weather_base_url:
-         server_command += f" {weather_base_url}"  # Append optional URL if provided
 
     try:
         logger.info("Initializing Weather MCPClient...")
@@ -421,11 +352,9 @@ def create_weather_mcp_client() -> MCPClient:
         raise
 ```
 
-- **Modify `create_mcp_clients`:** Add a check for your environment variables in `create_mcp_clients` and call your new creation function.
+2. Modify the `create_mcp_clients` function to include your weather client:
 
 ```python
-# In mcp_integration.py, inside create_mcp_clients function
-
 def create_mcp_clients() -> Dict[str, MCPClient]:
     """Creates and starts MCPClients for all supported services."""
     clients = {}
@@ -448,33 +377,41 @@ def create_mcp_clients() -> Dict[str, MCPClient]:
     return clients
 ```
 
-### 6. Test
+## Step 7: Test Your Integration
 
-- Ensure your `.env` file has the new environment variables set (e.g., `WEATHER_API_KEY=yourkey`).
+1. Add your OpenWeatherMap API key to your `.env` file:
 
-- Run the main integration script: `python mcp_integration.py`
+```
+WEATHER_API_KEY=your_openweathermap_api_key
+```
 
-- In the interactive prompt, try queries that should use your new tool:
+2. Run the integration script:
 
-  - "What tools are available?" (You should see your new tool listed).
-  - "What is the current weather in Paris?" (Or another query targeting your tool).
+```bash
+python mcp_integration.py
+```
 
-- Check the logs for output from both the main script and your `weather_mcp_server.py` script for debugging.
+3. Test with sample queries in the interactive prompt:
 
-## Hackathon Tips
+- "What's the weather like in London?"
+- "What's the forecast for Tokyo for the next few days?"
+- "Is it going to rain in New York today?"
 
-- **Keep it Simple:** Implement only the essential tools needed for your hackathon project.
+## Conclusion
 
-- **Reuse Code:** Leverage the structure and error handling from `postgres_mcp_server.py` or `rag_mcp_server.py`.
+You've now created a simple Weather MCP server that:
 
-- **Focus on call_tool:** This is where the core logic of your integration lies.
+- Handles geocoding automatically (city name to coordinates)
+- Fetches current weather and forecasts
+- Formats the data in a clean, easy-to-read structure
+- Provides helpful error messages
 
-- **Stateless:** Aim for stateless tool calls if possible, as it simplifies the server.
+The LLM (Claude) can now use this tool to answer weather-related questions without needing to know about coordinates or the underlying API complexity.
 
-- **Error Handling:** Return informative error messages in the `CallToolResponse(isError=True)` format so the LLM knows what went wrong.
+## Next steps
 
-- **Logging:** Add `logging.info()` and `logging.debug()` statements liberally to help with debugging.
+Now that you have created your own MCP tool server, consider:
 
-- **Test Incrementally:** Test each component as you build it. For example, test your handler methods directly before integrating them into the server.
-
-- **Graceful Degradation:** Design your server to handle missing configurations and partial functionality. For example, if a specific API endpoint is down, the server should still handle other tool calls.
+- Making your own custom MCP server for a database
+- Extending the internal logic of the agent workflow
+- Testing different models and how they perform
