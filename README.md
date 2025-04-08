@@ -116,6 +116,7 @@ Find documents related to our return policy.
 ## Notes
 
 - You may find the agent to sometimes fail depending on the model. It may even need a bit of pushing and prompt engineering to complete the query.
+- Harder queries will naturally fare better with stronger models.
 - Llama 70B seems to work pretty well.
 - Some hackathon ideas include building your own MCP tool server or modifying the agent workflow.
 
