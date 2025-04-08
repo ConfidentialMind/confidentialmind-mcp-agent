@@ -406,7 +406,7 @@ You've now created a simple Weather MCP server that:
 - Formats the data in a clean, easy-to-read structure
 - Provides helpful error messages
 
-The LLM (Claude) can now use this tool to answer weather-related questions without needing to know about coordinates or the underlying API complexity.
+The LLM can now use this tool to answer weather-related questions without needing to know about coordinates or the underlying API complexity.
 
 ## Next steps
 
