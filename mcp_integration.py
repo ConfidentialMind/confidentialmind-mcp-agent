@@ -215,24 +215,26 @@ def run_query(agent: Agent, query: str) -> None:
         logger.info("Executing main agent workflow via agent.run()")
         result_state = agent.run(query)  # Pass the raw query
 
-        print("\n--- Agent Final Response ---")
-        print(result_state.response or "Agent did not produce a response.")
-        print("--- End Agent Response ---")
+        # Print Debug info first
+        print("\n--- Agent Thoughts ---")
+        for i, thought in enumerate(result_state.thoughts):
+            print(f"{i + 1}. {thought}")
+        print("--- End Thoughts ---")
 
+        print("\n--- MCP Results Collected ---")
+        # Use default=str to handle non-serializable types like datetime
+        print(json.dumps(result_state.mcp_results, indent=2, default=str))
+        print("--- End MCP Results ---")
+
+        # Print error if exists
         if result_state.error:
             print(f"\nAgent encountered an error state: {result_state.error}")
             logger.error(f"Agent workflow finished with error state: {result_state.error}")
 
-        # Optional: Print debug info even if main response exists
-        if agent.debug or result_state.error:
-            print("\n--- Agent Thoughts ---")
-            for i, thought in enumerate(result_state.thoughts):
-                print(f"{i + 1}. {thought}")
-            print("--- End Thoughts ---")
-            print("\n--- MCP Results Collected ---")
-            # Use default=str to handle non-serializable types like datetime
-            print(json.dumps(result_state.mcp_results, indent=2, default=str))
-            print("--- End MCP Results ---")
+        # Print the final response LAST
+        print("\n--- Agent Final Response ---")
+        print(result_state.response or "Agent did not produce a response.")
+        print("--- End Agent Response ---")
 
     except Exception as e:
         print(f"\nFATAL ERROR during agent execution: {e}")
