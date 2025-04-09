@@ -129,6 +129,64 @@ def create_rag_mcp_client() -> MCPClient:
         raise  # Re-raise the exception
 
 
+def create_obsidian_mcp_client() -> MCPClient:
+    """Creates and starts the MCPClient for the Obsidian vault server."""
+    global mcp_client_instances
+    if "obsidian" in mcp_client_instances:
+        logger.warning("Obsidian MCPClient instance already exists.")
+        return mcp_client_instances["obsidian"]
+
+    obsidian_vault_path = os.environ.get("OBSIDIAN_VAULT_PATH")
+    if not obsidian_vault_path:
+        logger.error("FATAL: OBSIDIAN_VAULT_PATH environment variable is not set.")
+        raise ValueError("OBSIDIAN_VAULT_PATH must be set in the environment.")
+
+    # Ensure the vault path exists and is a directory
+    if not os.path.isdir(obsidian_vault_path):
+        logger.error(f"FATAL: Obsidian vault path {obsidian_vault_path} is not a valid directory.")
+        raise ValueError(f"Obsidian vault path {obsidian_vault_path} is not a valid directory.")
+
+    # Define the command to run the MCP server
+    # First check the expected path relative to this script
+    server_script_path = os.path.join(
+        os.path.dirname(__file__), "src", "mcp", "obsidian_mcp_server.py"
+    )
+    if not os.path.exists(server_script_path):
+        # Then check alternative paths
+        for alt_path in [
+            "src/mcp/obsidian_mcp_server.py",
+            "obsidian_mcp_server.py",
+            "src/obsidian_mcp_server.py",
+        ]:
+            if os.path.exists(alt_path):
+                server_script_path = alt_path
+                break
+        else:
+            logger.warning(f"Obsidian MCP server script not found at any expected path")
+            # Proceed with the original path as a last resort
+            server_script_path = "obsidian_mcp_server.py"
+
+    # Build the command with the vault path
+    server_command = f"{sys.executable} {server_script_path} {obsidian_vault_path}"
+
+    # Add debug flag if we're in debug mode
+    if logger.level == logging.DEBUG:
+        server_command += " --debug"
+
+    try:
+        logger.info("Initializing Obsidian MCPClient...")
+        # Create and store the client instance globally for cleanup
+        client = MCPClient(server_command=server_command)
+        mcp_client_instances["obsidian"] = client
+        logger.info("Obsidian MCPClient initialized and server process start initiated.")
+        return client
+    except Exception as e:
+        logger.error(f"FATAL: Failed to initialize Obsidian MCPClient: {e}", exc_info=True)
+        # Ensure cleanup is attempted even if constructor fails partially
+        cleanup_mcp_clients()
+        raise  # Re-raise the exception
+
+
 def create_mcp_clients() -> Dict[str, MCPClient]:
     """Creates and starts MCPClients for all supported services."""
     clients = {}
@@ -152,6 +210,16 @@ def create_mcp_clients() -> Dict[str, MCPClient]:
             logger.error(f"Failed to create RAG client: {e}")
     else:
         logger.warning("RAG_API_URL not set, skipping RAG MCP client creation")
+
+    # Create Obsidian client if configured
+    if os.environ.get("OBSIDIAN_VAULT_PATH"):
+        try:
+            obsidian_client = create_obsidian_mcp_client()
+            clients["obsidian"] = obsidian_client
+        except Exception as e:
+            logger.error(f"Failed to create Obsidian client: {e}")
+    else:
+        logger.warning("OBSIDIAN_VAULT_PATH not set, skipping Obsidian MCP client creation")
 
     if not clients:
         raise ValueError("No MCP clients could be created. Check your configuration.")
