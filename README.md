@@ -1,6 +1,6 @@
 # ConfidentialMind MCP Agent
 
-A powerful AI-powered agent that interfaces with PostgreSQL databases and RAG systems, enabling natural language interactions with your data. This agent uses the Model context protocol (MCP) architecture to provide a secure and flexible connection between LLMs, PostgreSQL databases, and RAG services.
+A powerful AI-powered agent that interfaces with PostgreSQL databases, RAG systems, and Obsidian vaults, enabling natural language interactions with your data. This agent uses the Model Context Protocol (MCP) architecture to provide a secure and flexible connection between LLMs, databases, and knowledge sources.
 
 ## Overview
 
@@ -11,7 +11,8 @@ ConfidentialMind MCP Agent allows you to:
 - Execute SQL queries based on natural language instructions
 - Get results in a structured, easy-to-understand format
 - Retrieve relevant information from RAG systems
-- Combine database queries with RAG knowledge retrieval
+- Access and search your Obsidian vault notes
+- Combine database queries with knowledge retrieval
 
 The agent uses a LangGraph-based workflow to process queries, plan actions, execute database operations, retrieve information from RAG systems, and generate human-friendly responses.
 
@@ -29,11 +30,13 @@ The system consists of the following components:
 
 5. **RAG MCP Server** (`src/mcp/rag_mcp_server.py`): Server that connects to a RAG service and provides MCP protocol access for knowledge retrieval.
 
-6. **Agent Core** (`src/core/agent.py`): LangGraph-based workflow that processes queries, plans actions, and generates responses.
+6. **Obsidian MCP Server** (`src/mcp/obsidian_mcp_server.py`): Server that connects to an Obsidian vault and provides MCP protocol access for notes and knowledge.
 
-7. **LLM Connector** (`src/connectors/llm.py`): Handles communication with LLM APIs.
+7. **Agent Core** (`src/core/agent.py`): LangGraph-based workflow that processes queries, plans actions, and generates responses.
 
-8. **ConfidentialMind Integration** (`src/connectors/confidentialmind.py`): Optional integration with ConfidentialMind for enhanced security and management.
+8. **LLM Connector** (`src/connectors/llm.py`): Handles communication with LLM APIs.
+
+9. **ConfidentialMind Integration** (`src/connectors/confidentialmind.py`): Optional integration with ConfidentialMind for enhanced security and management.
 
 ## Installation
 
@@ -67,6 +70,9 @@ LLM_API_KEY="your_api_key"  # Optional based on your LLM service
 # RAG API configuration
 RAG_API_URL="https://api.your-rag-service.com/v1/api/your-project-id"
 RAG_API_KEY="your-api-key-here"
+
+# Obsidian configuration
+OBSIDIAN_VAULT_PATH="/absolute/path/to/your/obsidian/vault"  # Path to Obsidian vault folder
 
 CONFIDENTIAL_MIND_LOCAL_CONFIG=true
 
@@ -111,6 +117,11 @@ What is the average order value in the last week?
 # RAG queries
 What information do we have about customer satisfaction?
 Find documents related to our return policy.
+
+# Obsidian queries
+What notes do I have about project planning?
+Find information about meeting notes in my vault
+Summarize my research notes on machine learning
 ```
 
 ## Notes
@@ -135,16 +146,18 @@ The agent uses MCP architecture:
 
 1. **MCP Protocol**: JSON-RPC 2.0 based protocol that defines four key methods:
 
-   - `mcp_listResources`: Lists available resources (database tables, RAG collections)
-   - `mcp_readResource`: Reads a specific resource (table schema, RAG collection details)
-   - `mcp_listTools`: Lists available tools (SQL query execution, RAG document retrieval)
-   - `mcp_callTool`: Executes a tool (runs a SQL query, retrieves relevant documents)
+   - `mcp_listResources`: Lists available resources (database tables, RAG collections, Obsidian notes)
+   - `mcp_readResource`: Reads a specific resource (table schema, RAG collection details, note content)
+   - `mcp_listTools`: Lists available tools (SQL query execution, RAG document retrieval, Obsidian search)
+   - `mcp_callTool`: Executes a tool (runs a SQL query, retrieves relevant documents, searches notes)
 
 2. **MCP Client**: Manages communication with the MCP servers, handling request/response cycles.
 
 3. **PostgreSQL MCP Server**: Connects to PostgreSQL and implements the MCP protocol, providing access to database functionality.
 
 4. **RAG MCP Server**: Connects to a RAG service and implements the MCP protocol, providing access to document retrieval functionality.
+
+5. **Obsidian MCP Server**: Connects to an Obsidian vault and implements the MCP protocol, providing access to notes and knowledge management.
 
 ### Agent Workflow
 
@@ -166,4 +179,25 @@ This workflow supports multi-hop reasoning and can adapt to execution failures w
 - PostgreSQL database
 - Access to an LLM API service (local or remote)
 - Access to a RAG API service
+- Obsidian vault (optional, for Obsidian integration)
 - ConfidentialMind account
+
+## MCP Tool Servers
+
+The system includes several MCP tool servers that provide different capabilities:
+
+1. **PostgreSQL MCP Server**: Connect to and query PostgreSQL databases using natural language
+   - Supports SQL query execution, schema exploration, and data analysis
+   - Restricts queries to read-only operations for security
+
+2. **RAG MCP Server**: Retrieve information from document collections
+   - Supports semantic search across document repositories
+   - Extracts relevant information based on natural language queries
+   
+3. **Obsidian MCP Server**: Access and search your Obsidian vault notes
+   - Retrieve note content by URI
+   - Search for topics across all notes
+   - Get notes by specific topics
+   - Extract key information and statistics from your vault
+
+Custom MCP servers can be developed following the examples in `src/mcp/`.
