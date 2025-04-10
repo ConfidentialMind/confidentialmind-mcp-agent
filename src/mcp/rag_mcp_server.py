@@ -1,13 +1,15 @@
 import json
 import logging
-import sys
+import os
 from typing import Any, Dict, Optional
 
 import requests
-from mcp_protocol import (
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from src.mcp.mcp_protocol import (
     CallToolRequestParams,
     CallToolResponse,
-    JsonRpcRequest,
     JsonRpcResponse,
     ListResourcesResponse,
     ListToolsResponse,
@@ -19,11 +21,17 @@ from mcp_protocol import (
     ToolInputSchema,
 )
 
+# Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [RAG MCP Server] %(levelname)s: %(message)s"
 )
+logger = logging.getLogger("rag-mcp")
+
+# Create FastAPI app
+app = FastAPI(title="RAG MCP Server")
 
 
+# RAG handler class
 class RAGHandler:
     """Handler for RAG-specific MCP requests"""
 
@@ -39,6 +47,8 @@ class RAGHandler:
                 "Content-Type": "application/json",
             }
             logging.info(f"Initialized RAGHandler with base URL: {rag_base_url} and API key")
+        else:
+            logging.info(f"Initialized RAGHandler with base URL: {rag_base_url} (no API key)")
 
     def handle_list_tools(self) -> ListToolsResponse:
         """Provide tool definitions for RAG operations"""
@@ -163,74 +173,10 @@ class RAGHandler:
                 isError=True,
             )
 
-    def _accumulate_streaming_response(self, response) -> Dict[str, Any]:
-        """Accumulate chunks from a streaming response into a single response object."""
-        accumulated_response = None
-
-        try:
-            for line in response.iter_lines():
-                if line:
-                    # Remove the "data: " prefix
-                    line_text = line.decode("utf-8")
-                    if line_text.startswith("data:"):
-                        data_str = line_text[5:].strip()
-                        if data_str == "[DONE]":
-                            break
-
-                        # Parse the JSON chunk
-                        try:
-                            chunk = json.loads(data_str)
-
-                            # Initialize the accumulated response from the first chunk
-                            if accumulated_response is None:
-                                accumulated_response = chunk
-                                # Initialize an empty content in the message
-                                if (
-                                    "choices" in accumulated_response
-                                    and accumulated_response["choices"]
-                                ):
-                                    first_choice = accumulated_response["choices"][0]
-                                    if "delta" in first_choice:
-                                        # Convert delta to message structure
-                                        role = first_choice["delta"].get("role", "assistant")
-                                        accumulated_response["choices"][0]["message"] = {
-                                            "role": role,
-                                            "content": "",
-                                        }
-                                        # Remove delta from accumulated response
-                                        if "delta" in accumulated_response["choices"][0]:
-                                            del accumulated_response["choices"][0]["delta"]
-
-                            # Accumulate content from delta
-                            if (
-                                "choices" in chunk
-                                and chunk["choices"]
-                                and "delta" in chunk["choices"][0]
-                            ):
-                                delta = chunk["choices"][0]["delta"]
-                                if "content" in delta and delta["content"]:
-                                    # Append to existing content
-                                    accumulated_response["choices"][0]["message"]["content"] += (
-                                        delta["content"]
-                                    )
-
-                        except json.JSONDecodeError as e:
-                            logging.warning(f"Failed to parse streaming JSON chunk: {e}")
-
-            # If we didn't receive any valid chunks
-            if accumulated_response is None:
-                accumulated_response = {
-                    "choices": [{"message": {"role": "assistant", "content": ""}}]
-                }
-
-            return accumulated_response
-
-        except Exception as e:
-            logging.error(f"Error accumulating streaming response: {e}", exc_info=True)
-            return {
-                "error": f"Streaming error: {str(e)}",
-                "choices": [{"message": {"role": "assistant", "content": ""}}],
-            }
+    def _handle_generate_completion(self, arguments: Dict[str, Any]) -> CallToolResponse:
+        # This method would be implemented if needed, but we're keeping the same functionality
+        # as the original code which doesn't fully implement this method
+        raise ValueError("rag_generate_completion is not implemented in this server")
 
     def handle_list_resources(self) -> ListResourcesResponse:
         """
@@ -257,77 +203,83 @@ class RAGHandler:
         )
 
 
-# --- Main Server Loop (Simplified Stdio JSON-RPC) ---
+# Request model for JSON-RPC requests
+class MCPRequest(BaseModel):
+    jsonrpc: str
+    id: Any
+    method: str
+    params: Optional[Dict[str, Any]] = None
 
 
-def run_server(rag_base_url: str, api_key: Optional[str] = None):
-    handler = RAGHandler(rag_base_url, api_key)
-    logging.info("RAG MCP Server Ready. Waiting for JSON-RPC requests on stdin...")
+# Global RAG handler instance
+rag_handler = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    global rag_handler
+
+    # Get RAG API URL and key from environment variables
+    rag_api_url = os.environ.get("RAG_API_URL")
+    if not rag_api_url:
+        raise RuntimeError("RAG_API_URL environment variable is not set")
+
+    rag_api_key = os.environ.get("RAG_API_KEY")
+
+    # Initialize RAG handler
+    try:
+        rag_handler = RAGHandler(rag_api_url, rag_api_key)
+        logging.info("RAG handler initialized successfully")
+    except Exception as e:
+        logging.error(f"Failed to initialize RAG handler: {e}", exc_info=True)
+        raise
+
+
+@app.post("/mcp")
+async def handle_mcp_request(request: MCPRequest):
+    global rag_handler
+
+    if not rag_handler:
+        raise HTTPException(status_code=500, detail="RAG handler not initialized")
+
+    logging.info(f"Received MCP request: method={request.method}, id={request.id}")
+
+    response_data = None
+    error_data = None
 
     try:
-        while True:
-            line = sys.stdin.readline()
-            if not line:
-                logging.info("Stdin closed, shutting down.")
-                break
+        if request.method == "mcp_listResources":
+            response_data = rag_handler.handle_list_resources().model_dump()
+        elif request.method == "mcp_readResource":
+            params = ReadResourceRequestParams.model_validate(request.params or {})
+            response_data = rag_handler.handle_read_resource(params).model_dump()
+        elif request.method == "mcp_listTools":
+            response_data = rag_handler.handle_list_tools().model_dump()
+        elif request.method == "mcp_callTool":
+            params = CallToolRequestParams.model_validate(request.params or {})
+            response_data = rag_handler.handle_call_tool(params).model_dump()
+        else:
+            raise ValueError(f"Unsupported MCP method: {request.method}")
+    except Exception as e:
+        logging.error(f"Error handling request {request.id}: {e}", exc_info=True)
+        error_data = {"code": -32000, "message": str(e)}
 
-            logging.debug(f"Received line: {line.strip()}")
-            try:
-                request_data = json.loads(line)
-                request = JsonRpcRequest.model_validate(request_data)
-                logging.info(f"Processing request ID {request.id}, Method: {request.method}")
+    # Create JSON-RPC response
+    response = JsonRpcResponse(id=request.id, result=response_data, error=error_data)
+    return response.model_dump(exclude_none=True)
 
-                response_data = None
-                error_data = None
 
-                try:
-                    if request.method == "mcp_listResources":
-                        response_data = handler.handle_list_resources().model_dump()
-                    elif request.method == "mcp_readResource":
-                        params = ReadResourceRequestParams.model_validate(request.params or {})
-                        response_data = handler.handle_read_resource(params).model_dump()
-                    elif request.method == "mcp_listTools":
-                        response_data = handler.handle_list_tools().model_dump()
-                    elif request.method == "mcp_callTool":
-                        params = CallToolRequestParams.model_validate(request.params or {})
-                        response_data = handler.handle_call_tool(params).model_dump()
-                    else:
-                        raise ValueError(f"Unsupported MCP method: {request.method}")
+@app.get("/health")
+async def health_check():
+    global rag_handler
 
-                except Exception as e:
-                    logging.error(f"Error handling request {request.id}: {e}", exc_info=True)
-                    error_data = {"code": -32000, "message": str(e)}
+    if not rag_handler:
+        raise HTTPException(status_code=500, detail="RAG handler not initialized")
 
-                response = JsonRpcResponse(id=request.id, result=response_data, error=error_data)
-
-            except json.JSONDecodeError:
-                logging.error(f"Failed to decode JSON: {line.strip()}")
-                response = JsonRpcResponse(
-                    id=None, error={"code": -32700, "message": "Parse error"}
-                )
-            except Exception as e:  # Catch validation errors etc.
-                logging.error(f"General error processing input line: {e}", exc_info=True)
-                # Try to get request ID if possible, otherwise use null
-                req_id = request.id if "request" in locals() and hasattr(request, "id") else None
-                response = JsonRpcResponse(
-                    id=req_id,
-                    error={"code": -32600, "message": f"Invalid Request: {e}"},
-                )
-
-            response_json = response.model_dump_json(exclude_none=True)
-            logging.debug(f"Sending response: {response_json}")
-            print(response_json, flush=True)
-
-    except KeyboardInterrupt:
-        logging.info("Keyboard interrupt received, shutting down.")
+    return {"status": "healthy"}
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python rag_mcp_server.py <rag_base_url> [api_key]", file=sys.stderr)
-        sys.exit(1)
+    import uvicorn
 
-    rag_base_url_arg = sys.argv[1]
-    api_key_arg = sys.argv[2] if len(sys.argv) > 2 else None
-
-    run_server(rag_base_url_arg, api_key_arg)
+    uvicorn.run(app, host="0.0.0.0", port=8002)

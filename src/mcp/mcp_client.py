@@ -1,11 +1,8 @@
 import json
 import logging
-import os
-import queue
-import subprocess
-import threading
-import time
 from typing import Any, Dict, Optional
+
+import httpx
 
 from src.mcp.mcp_protocol import JsonRpcRequest, JsonRpcResponse
 
@@ -15,194 +12,85 @@ logging.basicConfig(
 
 
 class MCPClient:
-    """Connector for MCP-compliant tool servers"""
+    """HTTP-based connector for MCP-compliant tool servers"""
 
-    def __init__(self, server_command: str, server_env: Optional[Dict[str, str]] = None):
-        self.server_command = server_command.split()  # Split command string into list
-        self.server_env = {**os.environ, **(server_env or {})}  # Merge env vars
-        self._process: Optional[subprocess.Popen] = None
+    def __init__(self, base_url: str):
+        """Initialize MCP client with the base URL of the MCP server
+
+        Args:
+            base_url: URL of the MCP server (e.g., http://postgres-mcp:8001)
+        """
+        self.base_url = base_url.rstrip("/")  # Remove trailing slash if present
         self._request_id_counter = 0
-        self._response_queue = queue.Queue()
-        self._listener_thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
+        self.timeout = 30  # Default timeout in seconds
 
-        # Use a timeout for initial startup
-        self._init_failed = False
-        try:
-            # Start the server with a timeout to prevent hanging
-            self.start_server(timeout=10)
-        except Exception as e:
-            logging.error(f"Server startup error: {e}", exc_info=True)
-            self._init_failed = True
-            # Continue running - we'll attempt to start the server on first request
-
-    def start_server(self, timeout=30):
-        with self._lock:
-            if self._process and self._process.poll() is None:
-                logging.warning("Server process already running.")
-                return
-
-            logging.info(f"Starting MCP server: {' '.join(self.server_command)[:100]}...")
-            try:
-                self._process = subprocess.Popen(
-                    self.server_command,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,  # Capture stderr for debugging
-                    text=True,
-                    bufsize=1,  # Line buffered
-                    encoding="utf-8",
-                    env=self.server_env,
-                )
-
-                # Wait for the process with timeout
-                start_time = time.time()
-                while time.time() - start_time < timeout:
-                    if self._process.poll() is not None:
-                        # Process exited
-                        stderr_output = (
-                            self._process.stderr.read() if self._process.stderr else "N/A"
-                        )
-                        raise RuntimeError(
-                            f"Server process failed to start. Exit code: {self._process.returncode}. Stderr:\n{stderr_output}"
-                        )
-                    time.sleep(0.1)
-
-                    # If we've waited at least 1 second, assume the process is stable
-                    if time.time() - start_time > 1:
-                        break
-
-                self._listener_thread = threading.Thread(
-                    target=self._listen_for_responses, daemon=True
-                )
-                self._listener_thread.start()
-                logging.info(f"MCP server process started (PID: {self._process.pid})")
-
-                # Start a thread to monitor stderr
-                self._stderr_thread = threading.Thread(target=self._monitor_stderr, daemon=True)
-                self._stderr_thread.start()
-
-            except Exception as e:
-                logging.error(f"Failed to start MCP server: {e}", exc_info=True)
-                self._process = None
-                raise
-
-    def _monitor_stderr(self):
-        try:
-            if self._process and self._process.stderr:
-                for line in iter(self._process.stderr.readline, ""):
-                    logging.warning(f"[Server STDERR] {line.strip()}")
-            logging.info("Server stderr monitoring ended.")
-        except Exception as e:
-            logging.error(f"Error monitoring server stderr: {e}")
-
-    def _listen_for_responses(self):
-        try:
-            if self._process and self._process.stdout:
-                for line in iter(self._process.stdout.readline, ""):
-                    logging.debug(f"Received from server stdout: {line.strip()}")
-                    try:
-                        response_data = json.loads(line)
-                        self._response_queue.put(response_data)
-                    except json.JSONDecodeError:
-                        logging.error(f"Failed to decode JSON from server: {line.strip()}")
-            logging.info("Server response listener thread finished.")
-        except Exception as e:
-            logging.error(f"Error in server response listener thread: {e}")
-
-    def stop_server(self):
-        with self._lock:
-            if self._process and self._process.poll() is None:
-                logging.info(f"Stopping MCP server process (PID: {self._process.pid})...")
-                try:
-                    self._process.terminate()  # Try graceful termination
-                    self._process.wait(timeout=5)  # Wait a bit
-                except subprocess.TimeoutExpired:
-                    logging.warning("Server did not terminate gracefully, killing.")
-                    self._process.kill()
-                except Exception as e:
-                    logging.error(f"Error stopping server process: {e}")
-                self._process = None
-                logging.info("MCP server process stopped.")
-            # Wait for listener threads to potentially finish
-            if self._listener_thread and self._listener_thread.is_alive():
-                # Cannot forcefully join daemon thread easily, just log
-                logging.debug("Listener thread is daemon, will exit with main process.")
-            if self._stderr_thread and self._stderr_thread.is_alive():
-                logging.debug("Stderr thread is daemon, will exit with main process.")
+        logging.info(f"Initialized MCP client for server at {self.base_url}")
 
     def _send_request(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        """Send a request to the MCP server"""
-        with self._lock:
-            # If initialization failed or server is not running, attempt to restart
-            if self._init_failed or not self._process or self._process.poll() is not None:
-                logging.warning("Server process is not running. Attempting restart.")
-                try:
-                    self.start_server()
-                    self._init_failed = False
-                except Exception as e:
-                    raise RuntimeError(f"Failed to start MCP server: {e}")
+        """Send a request to the MCP server using HTTP"""
+        # Increment request ID counter
+        self._request_id_counter += 1
+        request_id = self._request_id_counter
 
-            self._request_id_counter += 1
-            request_id = self._request_id_counter
-            request = JsonRpcRequest(id=request_id, method=method, params=params)
+        # Create JSON-RPC request
+        request = JsonRpcRequest(id=request_id, method=method, params=params)
+        request_json = request.model_dump(exclude_none=True)
 
-            request_json = request.model_dump_json(exclude_none=True) + "\n"
-            logging.debug(f"Sending to server stdin: {request_json.strip()}")
+        logging.debug(f"Sending request to {self.base_url}/mcp: {json.dumps(request_json)}")
 
-            try:
-                if self._process.stdin:
-                    self._process.stdin.write(request_json)
-                    self._process.stdin.flush()
-                else:
-                    raise IOError("Server stdin is not available.")
-            except (IOError, BrokenPipeError) as e:
-                logging.error(
-                    f"Failed to send request to server: {e}. Server might have crashed.",
-                    exc_info=True,
+        try:
+            # Send HTTP POST request to the MCP server
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(
+                    f"{self.base_url}/mcp",
+                    json=request_json,
+                    headers={"Content-Type": "application/json"},
                 )
-                self.stop_server()  # Mark server as stopped
-                raise RuntimeError(f"Failed to communicate with MCP server: {e}")
 
-        # Wait for the response with the matching ID
-        timeout = 30  # seconds timeout
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            try:
-                response_data = self._response_queue.get(timeout=1)
-                if response_data.get("id") == request_id:
-                    response = JsonRpcResponse.model_validate(response_data)
-                    logging.debug(f"Received matching response for ID {request_id}")
-                    if response.error:
-                        logging.error(f"MCP Server returned error: {response.error}")
-                        # Raise an exception or return error structure based on need
-                        raise RuntimeError(
-                            f"MCP Error: {response.error.get('message', 'Unknown error')}"
-                        )
-                    return response.result
-            except queue.Empty:
-                continue  # Keep waiting if queue is empty but timeout not reached
-            except Exception as e:
-                logging.error(f"Error processing response from queue: {e}")
-                raise  # Re-raise validation or other processing errors
+                # Raise exception for HTTP errors
+                response.raise_for_status()
 
-        logging.error(f"Timeout waiting for response for request ID {request_id}")
-        raise TimeoutError(f"Timeout waiting for MCP server response (ID: {request_id})")
+                # Parse the JSON response
+                response_data = response.json()
+                logging.debug(f"Received response: {json.dumps(response_data)}")
 
-    # --- Convenience methods for MCP calls (unchanged from original) ---
+                # Validate the response
+                response_obj = JsonRpcResponse.model_validate(response_data)
+
+                # Check for error
+                if response_obj.error:
+                    error_msg = response_obj.error.get("message", "Unknown error")
+                    error_code = response_obj.error.get("code", -1)
+                    logging.error(f"MCP server returned error: [{error_code}] {error_msg}")
+                    raise RuntimeError(f"MCP Error: {error_msg}")
+
+                # Return the result
+                return response_obj.result
+
+        except httpx.HTTPStatusError as e:
+            logging.error(f"HTTP error: {e.response.status_code} - {e.response.text}")
+            raise RuntimeError(f"HTTP error communicating with MCP server: {e}")
+        except httpx.RequestError as e:
+            logging.error(f"Request error: {e}")
+            raise RuntimeError(f"Error communicating with MCP server: {e}")
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+            raise RuntimeError(f"Unexpected error in MCP client: {e}")
+
+    # --- Convenience methods for MCP calls ---
 
     def list_resources(self) -> Dict[str, Any]:
+        """List available resources from the MCP server"""
         return self._send_request("mcp_listResources")
 
     def read_resource(self, uri: str) -> Dict[str, Any]:
+        """Read a specific resource from the MCP server"""
         return self._send_request("mcp_readResource", {"uri": uri})
 
     def list_tools(self) -> Dict[str, Any]:
+        """List available tools from the MCP server"""
         return self._send_request("mcp_listTools")
 
-    def call_tool(self, name: str, arguments: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Call a tool on the MCP server"""
         return self._send_request("mcp_callTool", {"name": name, "arguments": arguments})
-
-    def __del__(self):
-        # Ensure server is stopped when client is garbage collected
-        self.stop_server()

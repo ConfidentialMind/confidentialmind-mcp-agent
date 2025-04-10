@@ -1,15 +1,19 @@
 import json
 import logging
-import sys
+import os
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
-from mcp_protocol import (
+from fastapi import FastAPI, HTTPException
+from psycopg2 import sql
+from pydantic import BaseModel
+
+from src.mcp.mcp_protocol import (
     CallToolRequestParams,
     CallToolResponse,
-    JsonRpcRequest,
     JsonRpcResponse,
     ListResourcesResponse,
     ListToolsResponse,
@@ -21,19 +25,21 @@ from mcp_protocol import (
     ToolDefinition,
     ToolInputSchema,
 )
-from psycopg2 import sql
 
+# Configure logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [MCP Server] %(levelname)s: %(message)s"
+    level=logging.INFO, format="%(asctime)s [PostgreSQL MCP Server] %(levelname)s: %(message)s"
 )
+logger = logging.getLogger("postgres-mcp")
 
-# --- Database Logic (Similar to PostgreSQLMCP) ---
+# Create FastAPI app
+app = FastAPI(title="PostgreSQL MCP Server")
 
 
+# PostgreSQL handler class
 class PostgresHandler:
     def __init__(self, database_url: str):
         self.database_url = database_url
-        self._conn = None
         self._pool = psycopg2.pool.SimpleConnectionPool(1, 5, dsn=database_url)
         self.resource_base_url_parts = urlparse(database_url)
         logging.info(f"Initialized PostgresHandler for {self.resource_base_url_parts.path}")
@@ -200,77 +206,89 @@ class PostgresHandler:
         self._pool.closeall()
 
 
-# --- Main Server Loop (Simplified Stdio JSON-RPC) ---
+# Request model for JSON-RPC requests
+class MCPRequest(BaseModel):
+    jsonrpc: str
+    id: Any
+    method: str
+    params: Optional[Dict[str, Any]] = None
 
 
-def run_server(db_url: str):
-    handler = PostgresHandler(db_url)
-    logging.info("MCP Server Ready. Waiting for JSON-RPC requests on stdin...")
+# Global PostgreSQL handler instance
+postgres_handler = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    global postgres_handler
+
+    # Get database URL from environment variable
+    database_url = os.environ.get("PG_CONNECTION_STRING")
+    if not database_url:
+        raise RuntimeError("PG_CONNECTION_STRING environment variable is not set")
+
+    # Initialize PostgreSQL handler
+    try:
+        postgres_handler = PostgresHandler(database_url)
+        logging.info("PostgreSQL handler initialized successfully")
+    except Exception as e:
+        logging.error(f"Failed to initialize PostgreSQL handler: {e}", exc_info=True)
+        raise
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global postgres_handler
+    if postgres_handler:
+        postgres_handler.close()
+        logging.info("PostgreSQL handler closed")
+
+
+@app.post("/mcp")
+async def handle_mcp_request(request: MCPRequest):
+    global postgres_handler
+
+    if not postgres_handler:
+        raise HTTPException(status_code=500, detail="PostgreSQL handler not initialized")
+
+    logging.info(f"Received MCP request: method={request.method}, id={request.id}")
+
+    response_data = None
+    error_data = None
 
     try:
-        while True:
-            line = sys.stdin.readline()
-            if not line:
-                logging.info("Stdin closed, shutting down.")
-                break
+        if request.method == "mcp_listResources":
+            response_data = postgres_handler.handle_list_resources().model_dump()
+        elif request.method == "mcp_readResource":
+            params = ReadResourceRequestParams.model_validate(request.params or {})
+            response_data = postgres_handler.handle_read_resource(params).model_dump()
+        elif request.method == "mcp_listTools":
+            response_data = postgres_handler.handle_list_tools().model_dump()
+        elif request.method == "mcp_callTool":
+            params = CallToolRequestParams.model_validate(request.params or {})
+            response_data = postgres_handler.handle_call_tool(params).model_dump()
+        else:
+            raise ValueError(f"Unsupported MCP method: {request.method}")
+    except Exception as e:
+        logging.error(f"Error handling request {request.id}: {e}", exc_info=True)
+        error_data = {"code": -32000, "message": str(e)}
 
-            logging.debug(f"Received line: {line.strip()}")
-            try:
-                request_data = json.loads(line)
-                request = JsonRpcRequest.model_validate(request_data)
-                logging.info(f"Processing request ID {request.id}, Method: {request.method}")
+    # Create JSON-RPC response
+    response = JsonRpcResponse(id=request.id, result=response_data, error=error_data)
+    return response.model_dump(exclude_none=True)
 
-                response_data = None
-                error_data = None
 
-                try:
-                    if request.method == "mcp_listResources":
-                        response_data = handler.handle_list_resources().model_dump()
-                    elif request.method == "mcp_readResource":
-                        params = ReadResourceRequestParams.model_validate(request.params or {})
-                        response_data = handler.handle_read_resource(params).model_dump()
-                    elif request.method == "mcp_listTools":
-                        response_data = handler.handle_list_tools().model_dump()
-                    elif request.method == "mcp_callTool":
-                        params = CallToolRequestParams.model_validate(request.params or {})
-                        response_data = handler.handle_call_tool(params).model_dump()
-                    else:
-                        raise ValueError(f"Unsupported MCP method: {request.method}")
+@app.get("/health")
+async def health_check():
+    global postgres_handler
 
-                except Exception as e:
-                    logging.error(f"Error handling request {request.id}: {e}", exc_info=True)
-                    error_data = {"code": -32000, "message": str(e)}
+    if not postgres_handler:
+        raise HTTPException(status_code=500, detail="PostgreSQL handler not initialized")
 
-                response = JsonRpcResponse(id=request.id, result=response_data, error=error_data)
-
-            except json.JSONDecodeError:
-                logging.error(f"Failed to decode JSON: {line.strip()}")
-                response = JsonRpcResponse(
-                    id=None, error={"code": -32700, "message": "Parse error"}
-                )
-            except Exception as e:  # Catch validation errors etc.
-                logging.error(f"General error processing input line: {e}", exc_info=True)
-                # Try to get request ID if possible, otherwise use null
-                req_id = request.id if "request" in locals() and hasattr(request, "id") else None
-                response = JsonRpcResponse(
-                    id=req_id,
-                    error={"code": -32600, "message": f"Invalid Request: {e}"},
-                )
-
-            response_json = response.model_dump_json(exclude_none=True)
-            logging.debug(f"Sending response: {response_json}")
-            print(response_json, flush=True)
-
-    except KeyboardInterrupt:
-        logging.info("Keyboard interrupt received, shutting down.")
-    finally:
-        handler.close()
-        logging.info("Server shutdown complete.")
+    return {"status": "healthy"}
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python postgres_mcp_server.py <database_url>", file=sys.stderr)
-        sys.exit(1)
-    database_url_arg = sys.argv[1]
-    run_server(database_url_arg)
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8001)

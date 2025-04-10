@@ -1,16 +1,16 @@
-import argparse
 import json
 import logging
 import os
 import re
-import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
-from mcp_protocol import (
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from src.mcp.mcp_protocol import (
     CallToolRequestParams,
     CallToolResponse,
-    JsonRpcRequest,
     JsonRpcResponse,
     ListResourcesResponse,
     ListToolsResponse,
@@ -23,11 +23,17 @@ from mcp_protocol import (
     ToolInputSchema,
 )
 
+# Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [Obsidian MCP Server] %(levelname)s: %(message)s"
 )
+logger = logging.getLogger("obsidian-mcp")
+
+# Create FastAPI app
+app = FastAPI(title="Obsidian MCP Server")
 
 
+# Obsidian handler class
 class ObsidianHandler:
     """Handler for Obsidian vault MCP requests"""
 
@@ -780,86 +786,81 @@ class ObsidianHandler:
         return context
 
 
-def run_server(vault_path: str):
-    """Run the Obsidian MCP server"""
-    # Initialize the handler
+# Request model for JSON-RPC requests
+class MCPRequest(BaseModel):
+    jsonrpc: str
+    id: Any
+    method: str
+    params: Optional[Dict[str, Any]] = None
+
+
+# Global Obsidian handler instance
+obsidian_handler = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    global obsidian_handler
+
+    # Get vault path from environment variable
+    vault_path = os.environ.get("OBSIDIAN_VAULT_PATH")
+    if not vault_path:
+        raise RuntimeError("OBSIDIAN_VAULT_PATH environment variable is not set")
+
+    # Initialize Obsidian handler
     try:
-        handler = ObsidianHandler(vault_path)
-    except ValueError as e:
-        logging.error(f"Failed to initialize server: {e}")
-        sys.exit(1)
+        obsidian_handler = ObsidianHandler(vault_path)
+        logging.info("Obsidian handler initialized successfully")
+    except Exception as e:
+        logging.error(f"Failed to initialize Obsidian handler: {e}", exc_info=True)
+        raise
 
-    logging.info("Obsidian MCP Server Ready. Waiting for JSON-RPC requests on stdin...")
+
+@app.post("/mcp")
+async def handle_mcp_request(request: MCPRequest):
+    global obsidian_handler
+
+    if not obsidian_handler:
+        raise HTTPException(status_code=500, detail="Obsidian handler not initialized")
+
+    logging.info(f"Received MCP request: method={request.method}, id={request.id}")
+
+    response_data = None
+    error_data = None
 
     try:
-        while True:
-            line = sys.stdin.readline()
-            if not line:
-                logging.info("Stdin closed, shutting down.")
-                break
+        if request.method == "mcp_listResources":
+            response_data = obsidian_handler.handle_list_resources().model_dump()
+        elif request.method == "mcp_readResource":
+            params = ReadResourceRequestParams.model_validate(request.params or {})
+            response_data = obsidian_handler.handle_read_resource(params).model_dump()
+        elif request.method == "mcp_listTools":
+            response_data = obsidian_handler.handle_list_tools().model_dump()
+        elif request.method == "mcp_callTool":
+            params = CallToolRequestParams.model_validate(request.params or {})
+            response_data = obsidian_handler.handle_call_tool(params).model_dump()
+        else:
+            raise ValueError(f"Unsupported MCP method: {request.method}")
+    except Exception as e:
+        logging.error(f"Error handling request {request.id}: {e}", exc_info=True)
+        error_data = {"code": -32000, "message": str(e)}
 
-            logging.debug(f"Received line: {line.strip()}")
-            try:
-                request_data = json.loads(line)
-                request = JsonRpcRequest.model_validate(request_data)
-                logging.info(f"Processing request ID {request.id}, Method: {request.method}")
+    # Create JSON-RPC response
+    response = JsonRpcResponse(id=request.id, result=response_data, error=error_data)
+    return response.model_dump(exclude_none=True)
 
-                response_data = None
-                error_data = None
 
-                try:
-                    if request.method == "mcp_listResources":
-                        response_data = handler.handle_list_resources().model_dump()
-                    elif request.method == "mcp_readResource":
-                        params = ReadResourceRequestParams.model_validate(request.params or {})
-                        response_data = handler.handle_read_resource(params).model_dump()
-                    elif request.method == "mcp_listTools":
-                        response_data = handler.handle_list_tools().model_dump()
-                    elif request.method == "mcp_callTool":
-                        params = CallToolRequestParams.model_validate(request.params or {})
-                        response_data = handler.handle_call_tool(params).model_dump()
-                    else:
-                        raise ValueError(f"Unsupported MCP method: {request.method}")
+@app.get("/health")
+async def health_check():
+    global obsidian_handler
 
-                except Exception as e:
-                    logging.error(f"Error handling request {request.id}: {e}", exc_info=True)
-                    error_data = {"code": -32000, "message": str(e)}
+    if not obsidian_handler:
+        raise HTTPException(status_code=500, detail="Obsidian handler not initialized")
 
-                response = JsonRpcResponse(id=request.id, result=response_data, error=error_data)
-
-            except json.JSONDecodeError:
-                logging.error(f"Failed to decode JSON: {line.strip()}")
-                response = JsonRpcResponse(
-                    id=None, error={"code": -32700, "message": "Parse error"}
-                )
-            except Exception as e:  # Catch validation errors etc.
-                logging.error(f"General error processing input line: {e}", exc_info=True)
-                # Try to get request ID if possible, otherwise use null
-                req_id = request.id if "request" in locals() and hasattr(request, "id") else None
-                response = JsonRpcResponse(
-                    id=req_id,
-                    error={"code": -32600, "message": f"Invalid Request: {e}"},
-                )
-
-            response_json = response.model_dump_json(exclude_none=True)
-            logging.debug(f"Sending response: {response_json}")
-            print(response_json, flush=True)
-
-    except KeyboardInterrupt:
-        logging.info("Keyboard interrupt received, shutting down.")
+    return {"status": "healthy"}
 
 
 if __name__ == "__main__":
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Obsidian MCP Server")
-    parser.add_argument("vault_path", help="Absolute path to the Obsidian vault directory")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    import uvicorn
 
-    args = parser.parse_args()
-
-    # Set debug logging if requested
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    # Run the server
-    run_server(args.vault_path)
+    uvicorn.run(app, host="0.0.0.0", port=8003)
