@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 
+from src.connectors.cm_llm_connector import CMLLMConnector
+from src.connectors.cm_mcp_connector import CMMCPManager
 from src.mcp.mcp_client import MCPClient
 
 # Configure logging
@@ -48,11 +50,43 @@ class AgentState(BaseModel):
 
 
 class Agent:
-    """LangGraph-based agent implementation with improved multi-hop planning and tool discovery"""
+    """LangGraph-based agent implementation with SDK-based connections"""
 
-    def __init__(self, llm_connector, mcp_clients: Dict[str, MCPClient], debug=False):
-        self.llm = llm_connector
-        self.mcp_clients = mcp_clients
+    def __init__(
+        self,
+        llm_connector: Optional[CMLLMConnector] = None,
+        mcp_manager: Optional[CMMCPManager] = None,
+        mcp_clients: Optional[Dict[str, MCPClient]] = None,
+        debug: bool = False,
+    ):
+        """
+        Initialize the agent with SDK-based connections.
+
+        Args:
+            llm_connector: SDK-based LLM connector (will create if None)
+            mcp_manager: SDK-based MCP manager (will create if None)
+            mcp_clients: Optional dictionary of MCP clients (overrides mcp_manager)
+            debug: Enable debug logging
+        """
+        # Initialize LLM connector
+        self.llm = llm_connector or CMLLMConnector(config_id="LLM")
+
+        # Initialize MCP clients
+        if mcp_clients is not None:
+            # Use provided clients directly
+            self.mcp_clients = mcp_clients
+            logger.info(f"Using {len(mcp_clients)} provided MCP clients")
+        elif mcp_manager is not None:
+            # Get clients from manager
+            self.mcp_clients = mcp_manager.get_all_clients()
+            logger.info(f"Using {len(self.mcp_clients)} MCP clients from SDK manager")
+        else:
+            # Create new manager and register from environment
+            manager = CMMCPManager()
+            manager.register_from_environment()
+            self.mcp_clients = manager.get_all_clients()
+            logger.info(f"Using {len(self.mcp_clients)} auto-detected MCP clients")
+
         self.debug = debug
         self.conversation_history: List[Message] = []
 

@@ -1,16 +1,18 @@
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
 
+from confidentialmind_core.config_manager import ConfigManager, ConnectorSchema
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from api.database import get_db, get_messages_for_session, init_db, save_message
-from src.connectors.llm import LLMConnector
+from src.connectors.cm_llm_connector import CMLLMConnector
+from src.connectors.cm_mcp_connector import CMMCPManager
 from src.core.agent import Agent, Message
-from src.mcp.mcp_client import MCPClient
 
 app = FastAPI(title="ConfidentialMind MCP Agent API")
 
@@ -46,45 +48,60 @@ class ChatCompletionResponse(BaseModel):
     usage: Dict = Field(...)
 
 
-# Initialize MCP clients
-def get_mcp_clients():
-    clients = {}
-
-    # PostgreSQL MCP client
-    if os.environ.get("PG_MCP_URL"):
-        clients["postgres"] = MCPClient(base_url=os.environ.get("PG_MCP_URL"))
-
-    # RAG MCP client
-    if os.environ.get("RAG_MCP_URL"):
-        clients["rag"] = MCPClient(base_url=os.environ.get("RAG_MCP_URL"))
-
-    # Obsidian MCP client
-    if os.environ.get("OBSIDIAN_MCP_URL"):
-        clients["obsidian"] = MCPClient(base_url=os.environ.get("OBSIDIAN_MCP_URL"))
-
-    if not clients:
-        raise ValueError("No MCP clients could be created. Check your configuration.")
-
-    return clients
+# Initialize SDK-based MCP manager
+def get_mcp_manager():
+    manager = CMMCPManager()
+    manager.register_from_environment()
+    return manager
 
 
-# Initialize LLM connector
+# Initialize SDK-based LLM connector
 def get_llm_connector():
-    llm_url = os.environ.get("LLM_URL", "http://localhost:8080/v1")
-    llm_api_key = os.environ.get("LLM_API_KEY", "")
-    return LLMConnector(base_url=llm_url, headers={"Authorization": f"Bearer {llm_api_key}"})
+    return CMLLMConnector(config_id="LLM")
 
 
 @app.on_event("startup")
 async def startup_event():
     await init_db()
 
+    # Initialize SDK Config Manager during startup
+    from confidentialmind_core.config_manager import ConfigManager
+
+    config_manager = ConfigManager()
+
+    # Register standard MCP servers in the SDK configuration
+    if os.environ.get("PG_MCP_URL"):
+        server_url = os.environ.get("PG_MCP_URL")
+        config_manager.set_connector("postgres", server_url, {"Content-Type": "application/json"})
+        print(f"Registered PostgreSQL MCP server at {server_url}")
+
+    if os.environ.get("RAG_MCP_URL"):
+        server_url = os.environ.get("RAG_MCP_URL")
+        config_manager.set_connector("rag", server_url, {"Content-Type": "application/json"})
+        print(f"Registered RAG MCP server at {server_url}")
+
+    if os.environ.get("OBSIDIAN_MCP_URL"):
+        server_url = os.environ.get("OBSIDIAN_MCP_URL")
+        config_manager.set_connector("obsidian", server_url, {"Content-Type": "application/json"})
+        print(f"Registered Obsidian MCP server at {server_url}")
+
+    # Register LLM configuration (assuming LLM_URL and LLM_API_KEY environment variables)
+    if os.environ.get("LLM_URL"):
+        llm_url = os.environ.get("LLM_URL")
+        llm_api_key = os.environ.get("LLM_API_KEY", "")
+        config_manager.set_connector(
+            "LLM",
+            llm_url,
+            {"Authorization": f"Bearer {llm_api_key}", "Content-Type": "application/json"},
+        )
+        print(f"Registered LLM provider at {llm_url}")
+
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(
     request: ChatCompletionRequest,
     db=Depends(get_db),
-    mcp_clients=Depends(get_mcp_clients),
+    mcp_manager=Depends(get_mcp_manager),
     llm_connector=Depends(get_llm_connector),
 ):
     try:
@@ -120,8 +137,12 @@ async def chat_completions(
                 status_code=400, detail="Request must contain at least one user message."
             )
 
-        # Create agent instance
-        agent = Agent(llm_connector, mcp_clients)
+        # Create agent instance with SDK-based connectors
+        agent = Agent(
+            llm_connector=llm_connector,
+            mcp_manager=mcp_manager,
+            debug=(os.environ.get("DEBUG", "").lower() in ("true", "1", "yes")),
+        )
 
         # Set the conversation history in the agent
         agent.conversation_history = conversation_history
@@ -165,7 +186,33 @@ async def chat_completions(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": "1.0.0"}
+
+
+# Add route to check which MCP servers are available
+@app.get("/mcps")
+async def list_mcps(mcp_manager=Depends(get_mcp_manager)):
+    try:
+        clients = mcp_manager.get_all_clients()
+        available_servers = {}
+
+        for server_id, client in clients.items():
+            try:
+                # Test the connection by listing tools
+                tools = client.list_tools()
+                available_servers[server_id] = {
+                    "status": "available",
+                    "tools_count": len(tools.get("tools", [])),
+                }
+            except Exception as e:
+                available_servers[server_id] = {"status": "error", "error": str(e)}
+
+        return {
+            "registered_servers": list(mcp_manager.registered_servers),
+            "available_servers": available_servers,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing MCP servers: {str(e)}")
 
 
 if __name__ == "__main__":
