@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from sqlalchemy import Column, DateTime, Integer, String, Text
@@ -32,7 +32,7 @@ class ConversationMessage(Base):
     message_order = Column(Integer, nullable=False)
     role = Column(String(50), nullable=False)
     content = Column(Text, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 # Database initialization
@@ -70,7 +70,6 @@ async def save_message(db: AsyncSession, session_id: str, message: Message) -> N
             message_order=message_order,
             role=message.role,
             content=message.content,
-            timestamp=datetime.utcnow(),
         )
 
         # Save to database

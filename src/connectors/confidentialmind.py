@@ -9,8 +9,6 @@ from pydantic import BaseModel
 
 from src.connectors.llm import LLMConnector
 
-# from src.mcp.registry import MCPRegistry
-
 
 class ConfidentialMindConnector:
     """Integration with ConfidentialMind SDK for LLM and MCP connectors"""
@@ -30,7 +28,6 @@ class ConfidentialMindConnector:
                 type="llm",
                 label="Select Agent LLM",
                 config_id=self.llm_config_id,
-                description="Choose the LLM model that will power the agent",
             )
         ]
 
@@ -41,7 +38,6 @@ class ConfidentialMindConnector:
                     type=mcp_info.get("type", "api"),
                     label=mcp_info.get("label", f"MCP: {mcp_id}"),
                     config_id=mcp_id,
-                    description=mcp_info.get("description", f"Connection for {mcp_id} services"),
                 )
             )
 
@@ -67,7 +63,6 @@ class ConfidentialMindConnector:
                     type=mcp_type,
                     label=label,
                     config_id=mcp_id,
-                    description=description,
                 )
             )
             self.config_manager.update_connectors(self.connector_schemas)

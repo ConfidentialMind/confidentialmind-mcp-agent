@@ -76,16 +76,22 @@ class Agent:
             # Use provided clients directly
             self.mcp_clients = mcp_clients
             logger.info(f"Using {len(mcp_clients)} provided MCP clients")
-        elif mcp_manager is not None:
-            # Get clients from manager
-            self.mcp_clients = mcp_manager.get_all_clients()
-            logger.info(f"Using {len(self.mcp_clients)} MCP clients from SDK manager")
         else:
-            # Create new manager and register from environment
-            manager = CMMCPManager()
-            manager.register_from_environment()
-            self.mcp_clients = manager.get_all_clients()
-            logger.info(f"Using {len(self.mcp_clients)} auto-detected MCP clients")
+            # Use MCP manager passed in or created
+            current_mcp_manager = mcp_manager or CMMCPManager()
+
+            # Get clients from the manager. This relies on ConfigManager being initialized.
+            try:
+                self.mcp_clients = current_mcp_manager.get_all_clients()
+                logger.info(
+                    f"Using {len(self.mcp_clients)} MCP clients retrieved via CMMCPManager."
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to retrieve MCP clients via CMMCPManager: {e}. Agent might lack tool access.",
+                    exc_info=True,
+                )
+                self.mcp_clients = {}  # Initialize empty if retrieval fails
 
         self.debug = debug
         self.conversation_history: List[Message] = []
