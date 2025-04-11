@@ -48,6 +48,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
 
   # Obsidian MCP Server
   obsidian-mcp:
@@ -78,6 +79,7 @@ services:
       - PG_MCP_URL=http://postgres-mcp:8001
       - RAG_MCP_URL=http://rag-mcp:8002
       - OBSIDIAN_MCP_URL=http://obsidian-mcp:8003
+      - SERVICE_NAME=cm-agent-api
     ports:
       - "8000:8000"
     depends_on:

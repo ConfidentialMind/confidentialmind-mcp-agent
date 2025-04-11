@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from confidentialmind_core.config_manager import ConfigManager, ConnectorSchema
 from fastapi import Depends, FastAPI, HTTPException
@@ -147,7 +147,7 @@ class ChatCompletionRequest(BaseModel):
 
 class ChatCompletionResponse(BaseModel):
     id: str = Field(..., example="chatcmpl-123")
-    object: str = Field("chat.completion", const=True)
+    object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(..., example=1677858242)
     model: str = Field(..., example="cm-agent-1")  # Or dynamically set based on used model
     choices: List[Dict] = Field(...)
