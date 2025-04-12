@@ -43,13 +43,8 @@ def create_postgres_mcp_client() -> MCPClient:
         logger.warning("PostgreSQL MCPClient instance already exists.")
         return mcp_client_instances["postgres"]
 
-    postgres_conn_string = os.environ.get("PG_CONNECTION_STRING")
-    if not postgres_conn_string:
-        logger.error("FATAL: PG_CONNECTION_STRING environment variable is not set.")
-        raise ValueError("PG_CONNECTION_STRING must be set in the environment.")
-
-    # Define the command to run the MCP server
-    # First check the expected path relative to this script
+    # Define the command to run the MCP server - no connection string needed
+    # The server will use environment variables or SDK for connection details
     server_script_path = os.path.join(
         os.path.dirname(__file__), "src", "mcp", "postgres_mcp_server.py"
     )
@@ -64,7 +59,9 @@ def create_postgres_mcp_client() -> MCPClient:
             # Proceed with the original path as a last resort
             server_script_path = "postgres_mcp_server.py"
 
-    server_command = f"{sys.executable} {server_script_path} {postgres_conn_string}"
+    # Add debug flag if in debug mode
+    debug_flag = "--debug" if logger.level == logging.DEBUG else ""
+    server_command = f"{sys.executable} {server_script_path} {debug_flag}"
 
     try:
         logger.info("Initializing PostgreSQL MCPClient...")

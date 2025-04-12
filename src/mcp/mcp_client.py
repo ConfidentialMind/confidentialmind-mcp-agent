@@ -1,5 +1,7 @@
 import json
 import logging
+import subprocess
+import time
 from typing import Any, Dict, Optional
 
 import httpx
@@ -9,20 +11,34 @@ from src.mcp.mcp_protocol import JsonRpcRequest, JsonRpcResponse
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [MCP Client] %(levelname)s: %(message)s"
 )
+logger = logging.getLogger(__name__)
 
 
 class MCPClient:
     """HTTP-based connector for MCP-compliant tool servers"""
 
-    def __init__(self, base_url: str):
-        """Initialize MCP client with the base URL of the MCP server
+    def __init__(
+        self,
+        base_url: str,
+        headers: Optional[Dict[str, str]] = None,
+        server_command: Optional[str] = None,
+    ):
+        """Initialize MCP client with the base URL of the MCP server and optional headers
 
         Args:
             base_url: URL of the MCP server (e.g., http://postgres-mcp:8001)
+            headers: Optional HTTP headers to include in requests, such as API keys
+            server_command: Optional command to start MCP server process
         """
         self.base_url = base_url.rstrip("/")  # Remove trailing slash if present
+        self.headers = headers or {}  # Use provided headers or empty dict
         self._request_id_counter = 0
         self.timeout = 30  # Default timeout in seconds
+        self._server_process = None
+
+        # Start server process if command provided
+        if server_command:
+            self.start_server(server_command)
 
         logging.info(f"Initialized MCP client for server at {self.base_url}")
 
@@ -41,10 +57,14 @@ class MCPClient:
         try:
             # Send HTTP POST request to the MCP server
             with httpx.Client(timeout=self.timeout) as client:
+                # Merge default Content-Type with custom headers
+                headers = {"Content-Type": "application/json"}
+                headers.update(self.headers)  # Add any custom headers including auth
+
                 response = client.post(
                     f"{self.base_url}/mcp",
                     json=request_json,
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                 )
 
                 # Raise exception for HTTP errors
@@ -94,3 +114,40 @@ class MCPClient:
     def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Call a tool on the MCP server"""
         return self._send_request("mcp_callTool", {"name": name, "arguments": arguments})
+
+    def start_server(self, command: str) -> None:
+        """Start MCP server process"""
+        try:
+            logging.info(f"Starting MCP server with command: {command}")
+            self._server_process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            # Give the server a moment to start up
+            time.sleep(1)
+            logging.info("MCP server process started")
+        except Exception as e:
+            logging.error(f"Error starting MCP server: {e}")
+            raise RuntimeError(f"Failed to start MCP server: {e}")
+
+    def stop_server(self) -> None:
+        """Stop MCP server process if it was started by this client"""
+        if self._server_process:
+            try:
+                logging.info("Stopping MCP server process")
+                self._server_process.terminate()
+                self._server_process.wait(timeout=5)
+                logging.info("MCP server process stopped")
+            except Exception as e:
+                logging.error(f"Error stopping MCP server: {e}")
+                # Try to force kill if terminate fails
+                try:
+                    self._server_process.kill()
+                    logging.info("MCP server process force killed")
+                except Exception as kill_error:
+                    logging.error(f"Error force killing MCP server: {kill_error}")
+            finally:
+                self._server_process = None

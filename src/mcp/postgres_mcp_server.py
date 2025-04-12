@@ -1,6 +1,6 @@
 import json
 import logging
-import os
+import sys
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
@@ -10,6 +10,7 @@ import psycopg2.pool
 from fastapi import FastAPI, HTTPException
 from psycopg2 import sql
 from pydantic import BaseModel
+from pydantic_settings import BaseSettings
 
 from src.mcp.mcp_protocol import (
     CallToolRequestParams,
@@ -36,13 +37,131 @@ logger = logging.getLogger("postgres-mcp")
 app = FastAPI(title="PostgreSQL MCP Server")
 
 
+# PostgreSQL settings using Pydantic
+class PostgresSettings(BaseSettings):
+    """
+    Pydantic settings for PostgreSQL connection configuration.
+    Supports both local and stack connection modes.
+    """
+
+    # Connection mode setting
+    POSTGRES_MCP_CONNECTION_MODE: str = "stack"  # Default to 'stack'
+
+    # Local connection settings
+    PG_LOCAL_HOST: str = "localhost"
+    PG_LOCAL_PORT: int = 5432
+    PG_LOCAL_USER: str = "postgres"
+    PG_LOCAL_PASSWORD: str = "postgres"
+    PG_LOCAL_DBNAME: str = "postgres"
+
+    # Legacy connection string (for backwards compatibility)
+    PG_CONNECTION_STRING: Optional[str] = None
+
+    # Stack mode database settings (similar to RAGServerConfig)
+    database_host: str = "localhost"
+    database_port: int = 5432
+    database_user: str = "app"
+    database_password: str = "testpass"
+    database_name: str = "vector-db"
+
+    def get_connection_string(self, db_url: Optional[str] = None) -> str:
+        """Generate PostgreSQL connection string based on mode or provided URL.
+
+        Args:
+            db_url: Optional database URL. If provided, it's used for stack mode.
+                   Expected format for non-local: 'prod-db-rw.databases.svc.cluster.local'
+        """
+        # Local mode - use local environment variables
+        if self.POSTGRES_MCP_CONNECTION_MODE.lower() == "local":
+            conn_string = f"postgresql://{self.PG_LOCAL_USER}:{self.PG_LOCAL_PASSWORD}@{self.PG_LOCAL_HOST}:{self.PG_LOCAL_PORT}/{self.PG_LOCAL_DBNAME}"
+            logger.info(f"Using LOCAL connection mode: {self.PG_LOCAL_HOST}:{self.PG_LOCAL_PORT}")
+            return conn_string
+
+        # Stack mode - use ConfigManager or legacy connection string
+        elif self.POSTGRES_MCP_CONNECTION_MODE.lower() == "stack":
+            # Legacy connection string if provided (backward compatibility)
+            if self.PG_CONNECTION_STRING:
+                logger.info("Using legacy PG_CONNECTION_STRING for stack mode")
+                return self.PG_CONNECTION_STRING
+
+            # If db_url is provided, use it for host part
+            if db_url:
+                # In non-local case, use the provided URL without port
+                host_part = db_url
+                logger.info(f"Using stack mode with provided URL: {host_part}")
+            else:
+                # In local development, use host:port
+                host_part = f"{self.database_host}:{self.database_port}"
+                logger.info(f"Using stack mode with default host: {host_part}")
+
+            conn_string = f"postgresql://{self.database_user}:{self.database_password}@{host_part}/{self.database_name}"
+            return conn_string
+        else:
+            raise ValueError(f"Invalid connection mode: {self.POSTGRES_MCP_CONNECTION_MODE}")
+
+
 # PostgreSQL handler class
 class PostgresHandler:
-    def __init__(self, database_url: str):
-        self.database_url = database_url
-        self._pool = psycopg2.pool.SimpleConnectionPool(1, 5, dsn=database_url)
-        self.resource_base_url_parts = urlparse(database_url)
-        logging.info(f"Initialized PostgresHandler for {self.resource_base_url_parts.path}")
+    def __init__(self, settings: Optional[PostgresSettings] = None):
+        """Initialize PostgreSQL handler using settings
+
+        Args:
+            settings: PostgreSQL connection settings
+        """
+        self.settings = settings or PostgresSettings()
+
+        # Determine the database URL based on the mode
+        if self.settings.POSTGRES_MCP_CONNECTION_MODE.lower() == "stack":
+            try:
+                # Use get_api_parameters to get database URL
+                from confidentialmind_core.config_manager import get_api_parameters
+
+                url, _ = get_api_parameters("DATABASE")
+                if url:
+                    # Use the settings' get_connection_string method with the URL
+                    self.database_url = self.settings.get_connection_string(db_url=url)
+                    logger.info(f"Using stack mode with connection URL from SDK: {url}")
+                else:
+                    # No URL from SDK, fallback to settings without URL
+                    self.database_url = self.settings.get_connection_string()
+                    logger.warning("No DATABASE URL from SDK, using default settings")
+            except ImportError as e:
+                logger.warning(
+                    f"Error importing from confidentialmind_core: {e}, falling back to settings"
+                )
+                self.database_url = self.settings.get_connection_string()  # No URL provided
+        else:  # Local mode
+            # Build connection string from individual parameters
+            self.database_url = self.settings.get_connection_string()
+
+        # Log connection details (without credentials)
+        safe_url = self._get_safe_connection_string(self.database_url)
+        logger.info(f"Connecting to PostgreSQL with: {safe_url}")
+
+        # Initialize connection pool
+        self._pool = psycopg2.pool.SimpleConnectionPool(1, 5, dsn=self.database_url)
+
+        # Parse the database URL for resource identification
+        self.resource_base_url_parts = urlparse(self.database_url)
+        logger.info(f"Initialized PostgresHandler for {self.resource_base_url_parts.path}")
+
+    def _get_safe_connection_string(self, connection_string: str) -> str:
+        """Returns connection string with password masked for logging"""
+        try:
+            parts = urlparse(connection_string)
+            # Check if netloc contains credentials
+            if "@" in parts.netloc:
+                credentials, host_port = parts.netloc.split("@", 1)
+                if ":" in credentials:
+                    username, _ = credentials.split(":", 1)
+                    # Replace with masked password
+                    masked_netloc = f"{username}:****@{host_port}"
+                    parts = parts._replace(netloc=masked_netloc)
+                    return urlunparse(parts)
+            return connection_string
+        except Exception:
+            # If parsing fails, return a default masked string
+            return "postgresql://username:****@host:port/database"
 
     def _get_connection(self):
         return self._pool.getconn()
@@ -222,14 +341,12 @@ postgres_handler = None
 async def startup_event():
     global postgres_handler
 
-    # Get database URL from environment variable
-    database_url = os.environ.get("PG_CONNECTION_STRING")
-    if not database_url:
-        raise RuntimeError("PG_CONNECTION_STRING environment variable is not set")
-
-    # Initialize PostgreSQL handler
     try:
-        postgres_handler = PostgresHandler(database_url)
+        # Initialize PostgreSQL settings from environment
+        settings = PostgresSettings()
+
+        # Initialize PostgreSQL handler
+        postgres_handler = PostgresHandler(settings)
         logging.info("PostgreSQL handler initialized successfully")
     except Exception as e:
         logging.error(f"Failed to initialize PostgreSQL handler: {e}", exc_info=True)
@@ -291,4 +408,12 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
 
+    # Get debug flag from command-line arguments
+    debug_mode = "--debug" in sys.argv
+    if debug_mode:
+        logger.setLevel(logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Debug mode enabled")
+
+    # Start the server
     uvicorn.run(app, host="0.0.0.0", port=8001)

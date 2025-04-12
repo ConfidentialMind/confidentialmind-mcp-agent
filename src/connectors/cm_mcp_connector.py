@@ -61,11 +61,14 @@ class CMMCPManager:
                 )
                 raise ValueError(f"URL for MCP server {server_id} not configured in SDK.")
 
-            # Create client based on URL
-            # NOTE: MCPClient itself doesn't seem to use headers, but we retrieve them anyway
-            client = MCPClient(base_url=base_url)
+            # Create client based on URL and headers
+            client = MCPClient(base_url=base_url, headers=headers)
             self.clients[server_id] = client
             logger.info(f"Created MCP client for '{server_id}' using URL: {base_url}")
+
+            # Log if authentication is configured
+            if headers and any(key.lower() in ("authorization", "x-api-key") for key in headers):
+                logger.info(f"Authentication configured for MCP client '{server_id}'")
 
             return client
 
