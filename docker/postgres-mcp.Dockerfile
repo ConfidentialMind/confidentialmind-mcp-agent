@@ -7,7 +7,8 @@ RUN pip install --no-cache-dir \
   fastapi==0.115.12 \
   uvicorn==0.34.0 \
   psycopg2-binary==2.9.10 \
-  pydantic==2.11.0
+  pydantic==2.11.0 \
+  pydantic_settings>=2.8.1
 
 # Copy MCP protocol and server code
 COPY src/mcp/mcp_protocol.py ./src/mcp/
