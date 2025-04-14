@@ -29,6 +29,11 @@ llm_connector: CMLLMConnector = None
 logger = logging.getLogger(__name__)  # Added logger
 
 
+# Delete later
+class DummyConfig(BaseModel):
+    pass
+
+
 # --- FastAPI Lifespan Management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,7 +71,7 @@ async def lifespan(app: FastAPI):
         # Initialize the ConfigManager with the defined connectors
         # The SDK will handle loading actual connection details (from env vars or portal)
         config_manager.init_manager(
-            config_model=None,  # This agent might not have its own specific config model
+            config_model=DummyConfig(),
             connectors=connectors,
         )
         logger.info("ConfigManager initialized with connectors.")

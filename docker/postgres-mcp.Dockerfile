@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir \
   pydantic==2.11.0 \
   pydantic_settings>=2.8.1 \
   backoff>=2.2.1 \
-  confidentialmind-core>=0.1.6
+  confidentialmind-core>=0.1.4
 
 # Copy MCP protocol and server code
 COPY src/mcp/mcp_protocol.py ./src/mcp/
@@ -21,8 +21,8 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 # Expose port
-EXPOSE 8001
+EXPOSE 8080
 
 # Run the FastAPI application
-CMD ["uvicorn", "src.mcp.postgres_mcp_server:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["uvicorn", "src.mcp.postgres_mcp_server:app", "--host", "0.0.0.0", "--port", "8080"]
 

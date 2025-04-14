@@ -26,7 +26,7 @@ services:
     environment:
       - PG_CONNECTION_STRING=${PG_CONNECTION_STRING}
     ports:
-      - "8001:8001"
+      - "8080:8080"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 10s
