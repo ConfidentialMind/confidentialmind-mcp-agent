@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "asyncpg>=0.30.0",
+  "backoff>=2.2.1",
   "black>=25.1.0",
   "confidentialmind-core>=0.1.6",
   "fastapi>=0.115.12",
