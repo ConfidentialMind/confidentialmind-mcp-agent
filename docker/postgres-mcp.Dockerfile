@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir \
   pydantic==2.11.0 \
   pydantic_settings>=2.8.1 \
   backoff>=2.2.1 \
-  confidentialmind-core==0.1.4 \
+  confidentialmind-core==0.1.7 \
   asyncpg>=0.30.0
 
 # Copy MCP protocol and server code
