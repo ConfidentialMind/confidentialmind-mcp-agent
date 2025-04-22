@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import sys
+import uuid
 from typing import Any, Dict, List, Optional
 
 from langgraph.graph import END, StateGraph
@@ -9,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from src.connectors.cm_llm_connector import CMLLMConnector
 from src.connectors.cm_mcp_connector import CMMCPManager
+from src.core.agent_db_connection import AgentDatabase, AgentPostgresSettings, fetch_agent_db_url
 from src.mcp.mcp_client import MCPClient
 
 # Configure logging
@@ -34,6 +36,7 @@ class AgentState(BaseModel):
     """Agent workflow state"""
 
     query: str = ""
+    session_id: Optional[str] = None
     mcp_results: Dict[str, Any] = Field(default_factory=dict)
     thoughts: List[str] = Field(default_factory=list)
     response: Optional[str] = None
@@ -43,20 +46,20 @@ class AgentState(BaseModel):
     current_action_index: int = 0
     needs_more_info: bool = False
     follow_up_question: Optional[str] = None
-    conversation_history: List[Message] = Field(default_factory=list)
     available_schemas: List[Dict[str, str]] = Field(default_factory=list)
     execution_context: Dict[str, Any] = Field(default_factory=dict)
     requires_replanning: bool = False
 
 
 class Agent:
-    """LangGraph-based agent implementation with SDK-based connections"""
+    """LangGraph-based agent implementation with SDK-based connections and database-backed conversation history"""
 
     def __init__(
         self,
         llm_connector: Optional[CMLLMConnector] = None,
         mcp_manager: Optional[CMMCPManager] = None,
         mcp_clients: Optional[Dict[str, MCPClient]] = None,
+        db_config_id: str = "AGENT_SESSION_DB",
         debug: bool = False,
     ):
         """
@@ -66,6 +69,7 @@ class Agent:
             llm_connector: SDK-based LLM connector (will create if None)
             mcp_manager: SDK-based MCP manager (will create if None)
             mcp_clients: Optional dictionary of MCP clients (overrides mcp_manager)
+            db_config_id: Config ID for the database connection in ConfigManager
             debug: Enable debug logging
         """
         # Initialize LLM connector
@@ -94,7 +98,11 @@ class Agent:
                 self.mcp_clients = {}  # Initialize empty if retrieval fails
 
         self.debug = debug
-        self.conversation_history: List[Message] = []
+
+        # Database configuration
+        self.db_config_id = db_config_id
+        self.db = AgentDatabase(settings=AgentPostgresSettings())
+        self.current_history = []  # Temporary storage for current conversation
 
         # Set logging level based on debug flag
         if debug:
@@ -104,17 +112,112 @@ class Agent:
         self.graph = self._build_graph().compile()
         logger.info("Agent workflow graph compiled")
 
-    def get_history(self) -> List[Message]:
-        """Get the conversation history.
+    async def get_history(self, session_id: str) -> List[Message]:
+        """Get the conversation history for a session from the database.
+
+        Args:
+            session_id: The session ID to retrieve history for
 
         Returns:
             List of messages in the conversation history
         """
-        return self.conversation_history
+        return await self._load_history(session_id)
 
-    def clear_history(self) -> None:
-        """Clear the conversation history."""
-        self.conversation_history = []
+    async def clear_history(self, session_id: str) -> bool:
+        """Clear the conversation history for a session in the database.
+
+        Args:
+            session_id: The session ID to clear history for
+
+        Returns:
+            True if successfully cleared, False otherwise
+        """
+        try:
+            await self.db.ensure_connected()
+            await self.db.execute_query(
+                "DELETE FROM conversation_messages WHERE session_id = $1",
+                session_id,
+                fetch_type="none",
+            )
+            logger.info(f"Cleared conversation history for session {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing history for session {session_id}: {e}")
+            return False
+
+    async def _load_history(self, session_id: str) -> List[Message]:
+        """Load conversation history from the database for a session.
+
+        Args:
+            session_id: The session ID to load history for
+
+        Returns:
+            List of Message objects representing the conversation history
+        """
+        try:
+            await self.db.ensure_connected()
+            results = await self.db.execute_query(
+                """
+                SELECT role, content 
+                FROM conversation_messages 
+                WHERE session_id = $1 
+                ORDER BY message_order
+                """,
+                session_id,
+            )
+
+            messages = [Message(role=row["role"], content=row["content"]) for row in results]
+            logger.info(f"Loaded {len(messages)} messages for session {session_id}")
+            return messages
+        except Exception as e:
+            logger.error(f"Error loading history for session {session_id}: {e}")
+            return []  # Return empty list on error
+
+    async def _save_message(self, session_id: str, message: Message) -> bool:
+        """Save a message to the database for a session.
+
+        Args:
+            session_id: The session ID to save the message for
+            message: The message to save
+
+        Returns:
+            True if successfully saved, False otherwise
+        """
+        try:
+            await self.db.ensure_connected()
+
+            # Get the next message order
+            max_order = await self.db.execute_query(
+                "SELECT MAX(message_order) FROM conversation_messages WHERE session_id = $1",
+                session_id,
+                fetch_type="val",
+            )
+
+            # If this is the first message, start at 0
+            message_order = 0 if max_order is None else max_order + 1
+
+            # Insert the message
+            await self.db.execute_query(
+                """
+                INSERT INTO conversation_messages 
+                (session_id, message_order, role, content, timestamp) 
+                VALUES ($1, $2, $3, $4, NOW())
+                """,
+                session_id,
+                message_order,
+                message.role,
+                message.content,
+                fetch_type="none",
+            )
+
+            # Also add to current history for this run
+            self.current_history.append(message)
+
+            logger.info(f"Saved message for session {session_id} with order {message_order}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving message for session {session_id}: {e}")
+            return False  # Return False on error
 
     def _build_graph(self) -> StateGraph:
         """Build the agent workflow graph with improved planning capabilities"""
@@ -241,10 +344,11 @@ class Agent:
             state.query,
         )
 
-        # Add the user query to conversation history (both in the state and in the agent)
+        # Add the user query to conversation history
         new_message = Message(role="user", content=state.query)
-        state.conversation_history.append(new_message)
-        self.conversation_history.append(new_message)
+
+        # Store the message in the database (need to handle this in run since this isn't async)
+        state.execution_context["user_message_to_save"] = new_message
 
         # Prepare MCP tool information for the LLM prompt
         mcp_info = "Available Tool Servers:\n"
@@ -281,7 +385,7 @@ class Agent:
                     mcp_info += f"  - {res.get('name', res.get('uri'))} (URI: {res.get('uri')})\n"
 
         # Format conversation history for the prompt
-        conversation_context = self._format_conversation_history()
+        conversation_context = self._format_conversation_history(self.current_history)
 
         # Generate the planning prompt with improved multi-hop guidance
         prompt = f"""
@@ -787,7 +891,9 @@ class Agent:
         formatted_results = self._format_results(state.mcp_results)
 
         # Format conversation history for the prompt
-        conversation_context = self._format_conversation_history(exclude_current=True)
+        conversation_context = self._format_conversation_history(
+            self.current_history, exclude_current=True
+        )
 
         # Enhanced prompt with better guidance for different MCP response types
         prompt = f"""
@@ -827,19 +933,19 @@ class Agent:
         state.response = response
         logger.info("Response generated (length: %d characters)", len(response))
 
-        # Add the assistant's response to the conversation history
-        new_message = Message(role="assistant", content=response)
-        state.conversation_history.append(new_message)
-        self.conversation_history.append(new_message)
+        # Add the assistant's response to conversation (will be saved to DB in the run method)
+        state.execution_context["assistant_message_to_save"] = Message(
+            role="assistant", content=response
+        )
 
         return state
 
-    def _format_conversation_history(self, exclude_current=False) -> str:
+    def _format_conversation_history(self, history: List[Message], exclude_current=False) -> str:
         """Format conversation history for prompts"""
-        if not self.conversation_history:
+        if not history:
             return ""
 
-        history_to_include = self.conversation_history
+        history_to_include = history
         if exclude_current and len(history_to_include) > 0:
             history_to_include = history_to_include[:-1]
 
@@ -981,73 +1087,102 @@ class Agent:
                 "actions": [],
             }
 
-    def run(self, query: str) -> AgentState:
-        """Execute the complete agent workflow"""
+    async def run(self, query: str, session_id: Optional[str] = None) -> AgentState:
+        """Execute the complete agent workflow with database-backed conversation history
+
+        Args:
+            query: The user query to process
+            session_id: Optional session ID. If not provided, a new one will be generated.
+
+        Returns:
+            AgentState: The final agent state after workflow execution
+        """
         logger.info("Starting agent workflow execution")
         logger.info("Query: %s", query)
+
+        # Generate or use provided session ID
+        definite_session_id = session_id or str(uuid.uuid4())
+        logger.info(f"Using session ID: {definite_session_id}")
+
+        # Connect to database if not already connected
+        try:
+            # Fetch database URL with retry logic
+            db_url = await fetch_agent_db_url(self.db_config_id)
+            await self.db.connect(db_url)
+        except Exception as e:
+            logger.error(f"Database connection error: {e}", exc_info=True)
+            # Continue without database connection - we'll handle history in memory only
+
+        # Load conversation history from database
+        try:
+            if self.db.is_connected():
+                self.current_history = await self._load_history(definite_session_id)
+                logger.info(
+                    f"Loaded {len(self.current_history)} messages from database for session {definite_session_id}"
+                )
+            else:
+                logger.warning("Database not connected, using empty conversation history")
+                self.current_history = []
+        except Exception as e:
+            logger.error(f"Error loading conversation history: {e}", exc_info=True)
+            self.current_history = []  # Use empty history on error
 
         # Check for conversation management commands
         if query.strip().lower() == "clear history":
             logger.info("Clearing conversation history")
-            self.clear_history()
-            response_state = AgentState(query=query)
+            if self.db.is_connected():
+                await self.clear_history(definite_session_id)
+            self.current_history = []
+            response_state = AgentState(query=query, session_id=definite_session_id)
             response_state.response = "Conversation history has been cleared."
             return response_state
 
         if query.strip().lower() == "show history":
             logger.info("Showing conversation history")
             history_text = "Conversation history:\n\n"
-            for i, message in enumerate(self.conversation_history):
+            for i, message in enumerate(self.current_history):
                 history_text += f"{i + 1}. {message}\n"
-            response_state = AgentState(query=query)
+            response_state = AgentState(query=query, session_id=definite_session_id)
             response_state.response = history_text
             return response_state
 
-        initial_state = AgentState(query=query)
+        # Create initial state with session ID
+        initial_state = AgentState(query=query, session_id=definite_session_id)
 
-        # If we have conversation history, copy it to the new state
-        if self.conversation_history:
-            initial_state.conversation_history = self.conversation_history.copy()
+        # Save user message to database
+        user_message = Message(role="user", content=query)
+        if self.db.is_connected():
+            await self._save_message(definite_session_id, user_message)
+        self.current_history.append(user_message)
 
         logger.debug("Invoking agent workflow graph")
         result = self.graph.invoke(initial_state)
         logger.debug("Agent workflow graph execution completed")
 
+        # Save assistant message to database if response was generated
+        result_state = result
         # Handle different return types from newer LangGraph versions
         if isinstance(result, dict):
             logger.debug("Result is dictionary, extracting state")
             # Check if state is directly in the dictionary
             if "state" in result:
                 logger.debug("Found 'state' in result dictionary")
-                return result["state"]
-
+                result_state = result["state"]
             # If there's a response, create a new state with it
-            if "response" in result:
+            elif "response" in result:
                 logger.debug("Found 'response' in result dictionary")
-                new_state = AgentState(query=query)
-                new_state.response = result["response"]
-
+                result_state = AgentState(query=query, session_id=definite_session_id)
+                result_state.response = result["response"]
                 if "thoughts" in result:
-                    new_state.thoughts = result["thoughts"]
-
+                    result_state.thoughts = result["thoughts"]
                 if "mcp_results" in result:
-                    new_state.mcp_results = result["mcp_results"]
-
+                    result_state.mcp_results = result["mcp_results"]
                 if "error" in result:
-                    new_state.error = result["error"]
+                    result_state.error = result["error"]
 
-                # Add to conversation history
-                new_state.conversation_history = self.conversation_history.copy()
+        # If result_state has an assistant message to save, save it to the database
+        if result_state.response and self.db.is_connected():
+            assistant_message = Message(role="assistant", content=result_state.response)
+            await self._save_message(definite_session_id, assistant_message)
 
-                return new_state
-
-        # If result is already an AgentState, return it directly
-        if isinstance(result, AgentState):
-            logger.debug("Result is AgentState, returning directly")
-            return result
-
-        # If we couldn't convert it, create a fallback state
-        logger.warning("Could not extract state from result, creating fallback")
-        fallback_state = AgentState(query=query)
-        fallback_state.response = "Could not extract a response from the agent result"
-        return fallback_state
+        return result_state

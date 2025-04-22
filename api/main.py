@@ -1,4 +1,4 @@
-import logging  # Added logging
+import logging
 import os
 import time
 import uuid
@@ -10,10 +10,9 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from api.database import get_db, get_messages_for_session, init_db, save_message
 from src.connectors.cm_llm_connector import CMLLMConnector
 from src.connectors.cm_mcp_connector import CMMCPManager
-from src.core.agent import Agent, Message
+from src.core.agent import Agent
 
 # --- Configuration ---
 # Define config_ids used by the application
@@ -21,12 +20,13 @@ LLM_CONFIG_ID = "LLM"
 PG_MCP_CONFIG_ID = "postgres"
 RAG_MCP_CONFIG_ID = "rag"
 OBSIDIAN_MCP_CONFIG_ID = "obsidian"
+AGENT_SESSION_DB_CONFIG_ID = "AGENT_SESSION_DB"
 
 # Global handlers - initialized during lifespan
 mcp_manager: CMMCPManager = None
 llm_connector: CMLLMConnector = None
 
-logger = logging.getLogger(__name__)  # Added logger
+logger = logging.getLogger(__name__)
 
 
 # Delete later
@@ -40,10 +40,6 @@ async def lifespan(app: FastAPI):
     # Startup section
     global mcp_manager, llm_connector
     logger.info("Starting up MCP Agent API...")
-
-    # Initialize Database
-    await init_db()
-    logger.info("Database initialized.")
 
     # Initialize Config Manager and Connectors
     config_manager = ConfigManager()
@@ -63,6 +59,11 @@ async def lifespan(app: FastAPI):
             type="api",
             label="Obsidian MCP Server",
             config_id=OBSIDIAN_MCP_CONFIG_ID,
+        ),
+        ConnectorSchema(
+            type="database",
+            label="Agent Session Database",
+            config_id=AGENT_SESSION_DB_CONFIG_ID,
         ),
         # Add other connectors here if needed
     ]
@@ -165,7 +166,6 @@ class ChatCompletionResponse(BaseModel):
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(
     request: ChatCompletionRequest,
-    db=Depends(get_db),
     # Use the new dependency functions
     current_mcp_manager: CMMCPManager = Depends(get_mcp_manager_dependency),
     current_llm_connector: CMLLMConnector = Depends(get_llm_connector_dependency),
@@ -174,29 +174,10 @@ async def chat_completions(
         # Get or generate session ID
         session_id = request.session_id or str(uuid.uuid4())
 
-        # Get conversation history from database
-        conversation_history = await get_messages_for_session(db, session_id)
-
         # Get latest user message for the agent to process
         latest_user_msg_obj = None
         if request.messages and request.messages[-1].role == "user":
             latest_user_msg_content = request.messages[-1].content
-            latest_user_msg_obj = Message(role="user", content=latest_user_msg_content)
-
-            # Check if this message is genuinely new compared to the stored history
-            is_new_user_message = True
-            if conversation_history:
-                last_stored_message = conversation_history[-1]
-                if (
-                    last_stored_message.role == "user"
-                    and last_stored_message.content == latest_user_msg_content
-                ):
-                    is_new_user_message = False
-
-            # If new, save it and add to the history list we pass to the agent
-            if is_new_user_message:
-                await save_message(db, session_id, latest_user_msg_obj)
-                conversation_history.append(latest_user_msg_obj)
         else:
             # Handle cases where the last message isn't from the user or request is empty
             raise HTTPException(
@@ -207,19 +188,12 @@ async def chat_completions(
         agent = Agent(
             llm_connector=current_llm_connector,
             mcp_manager=current_mcp_manager,  # Pass the initialized manager
+            db_config_id=AGENT_SESSION_DB_CONFIG_ID,
             debug=(os.environ.get("DEBUG", "").lower() in ("true", "1", "yes")),
         )
 
-        # Set the conversation history in the agent
-        agent.conversation_history = conversation_history
-
-        # Process the query
-        result = agent.run(latest_user_msg_obj.content)
-
-        # Save the assistant's response to database
-        if result.response:
-            assistant_message = Message(role="assistant", content=result.response)
-            await save_message(db, session_id, assistant_message)
+        # Process the query - this now handles session management and DB persistence
+        result = await agent.run(latest_user_msg_content, session_id=session_id)
 
         # Format the response in OpenAI-compatible format
         response = {
@@ -260,8 +234,7 @@ async def health_check():
     # Add checks for DB connection, config manager status etc. if needed
     if mcp_manager is None or llm_connector is None:
         return {"status": "unhealthy", "reason": "Components failed to initialize"}
-    # TODO: Add check for DB connection status if possible
-    return {"status": "healthy", "version": "1.0.1"}  # Updated version
+    return {"status": "healthy", "version": "1.0.1"}
 
 
 # Add route to check which MCP servers are available
@@ -306,6 +279,64 @@ async def list_mcps(current_mcp_manager: CMMCPManager = Depends(get_mcp_manager_
     except Exception as e:
         logger.error(f"Error listing MCP servers: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error listing MCP servers: {str(e)}")
+
+
+# Add route to get conversation history for a session
+@app.get("/sessions/{session_id}/history")
+async def get_session_history(
+    session_id: str,
+    current_mcp_manager: CMMCPManager = Depends(get_mcp_manager_dependency),
+    current_llm_connector: CMLLMConnector = Depends(get_llm_connector_dependency),
+):
+    try:
+        # Create agent instance
+        agent = Agent(
+            llm_connector=current_llm_connector,
+            mcp_manager=current_mcp_manager,
+            db_config_id=AGENT_SESSION_DB_CONFIG_ID,
+        )
+
+        # Get history from the agent's database
+        history = await agent.get_history(session_id)
+
+        # Format history for response
+        formatted_history = [{"role": msg.role, "content": msg.content} for msg in history]
+
+        return {
+            "session_id": session_id,
+            "messages": formatted_history,
+            "message_count": len(formatted_history),
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving session history: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error retrieving session history: {str(e)}")
+
+
+# Add route to delete a conversation session
+@app.delete("/sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    current_mcp_manager: CMMCPManager = Depends(get_mcp_manager_dependency),
+    current_llm_connector: CMLLMConnector = Depends(get_llm_connector_dependency),
+):
+    try:
+        # Create agent instance
+        agent = Agent(
+            llm_connector=current_llm_connector,
+            mcp_manager=current_mcp_manager,
+            db_config_id=AGENT_SESSION_DB_CONFIG_ID,
+        )
+
+        # Clear history for this session
+        success = await agent.clear_history(session_id)
+
+        if success:
+            return {"status": "success", "message": f"Session {session_id} deleted successfully"}
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to delete session {session_id}")
+    except Exception as e:
+        logger.error(f"Error deleting session: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error deleting session: {str(e)}")
 
 
 if __name__ == "__main__":
