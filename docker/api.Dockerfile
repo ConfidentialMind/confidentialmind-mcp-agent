@@ -53,7 +53,7 @@ ENV PYTHONUNBUFFERED=1
 USER appuser
 
 # Expose the application port
-EXPOSE 8000
+EXPOSE 8080
 
 # Command to run the application using uvicorn (installed in the venv)
-CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8080"]
