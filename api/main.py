@@ -5,7 +5,11 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Dict, List, Literal, Optional
 
-from confidentialmind_core.config_manager import ConfigManager, ConnectorSchema
+from confidentialmind_core.config_manager import (
+    ArrayConnectorSchema,
+    ConfigManager,
+    ConnectorSchema,
+)
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -17,10 +21,15 @@ from src.core.agent import Agent
 # --- Configuration ---
 # Define config_ids used by the application
 LLM_CONFIG_ID = "LLM"
+AGENT_SESSION_DB_CONFIG_ID = "AGENT_SESSION_DB"
+
+# MCP server IDs - both individual and array
+MCP_ARRAY_CONFIG_ID = "MCP_SERVERS"  # For array connector approach
+
+# Individual MCP server IDs - used for backward compatibility in local development
 PG_MCP_CONFIG_ID = "postgres"
 RAG_MCP_CONFIG_ID = "rag"
 OBSIDIAN_MCP_CONFIG_ID = "obsidian"
-AGENT_SESSION_DB_CONFIG_ID = "AGENT_SESSION_DB"
 
 # Global handlers - initialized during lifespan
 mcp_manager: CMMCPManager = None
@@ -29,7 +38,7 @@ llm_connector: CMLLMConnector = None
 logger = logging.getLogger(__name__)
 
 
-# Delete later
+# Config model with minimal requirements
 class DummyConfig(BaseModel):
     pass
 
@@ -43,8 +52,22 @@ async def lifespan(app: FastAPI):
 
     # Initialize Config Manager and Connectors
     config_manager = ConfigManager()
-    connectors: list[ConnectorSchema] = [
+
+    # Regular connectors - for LLM and database
+    regular_connectors: list[ConnectorSchema] = [
         ConnectorSchema(type="llm", label="Agent LLM", config_id=LLM_CONFIG_ID),
+        ConnectorSchema(
+            type="database",
+            label="Agent Session Database",
+            config_id=AGENT_SESSION_DB_CONFIG_ID,
+        ),
+    ]
+
+    # HYBRID APPROACH: Register both individual MCP connectors and array connector
+    # This provides backward compatibility for local development
+
+    # Individual MCP connectors (backward compatibility)
+    individual_mcp_connectors: list[ConnectorSchema] = [
         ConnectorSchema(
             type="api",
             label="PostgreSQL MCP Server",
@@ -60,26 +83,37 @@ async def lifespan(app: FastAPI):
             label="Obsidian MCP Server",
             config_id=OBSIDIAN_MCP_CONFIG_ID,
         ),
-        ConnectorSchema(
-            type="database",
-            label="Agent Session Database",
-            config_id=AGENT_SESSION_DB_CONFIG_ID,
-        ),
-        # Add other connectors here if needed
     ]
 
+    # Add individual MCP connectors to the regular connectors list
+    regular_connectors.extend(individual_mcp_connectors)
+
+    # Array connector for MCP services - for stack deployment
+    array_connectors: list[ArrayConnectorSchema] = [
+        ArrayConnectorSchema(
+            type="api",
+            label="MCP Servers (Array)",
+            config_id=MCP_ARRAY_CONFIG_ID,
+        ),
+    ]
+
+    # Detect if we're in LOCAL_DEV mode
+    is_local_dev = os.environ.get("LOCAL_DEV", "").lower() in ("true", "1", "yes")
+    if is_local_dev:
+        logger.info("Running in LOCAL_DEV mode, prioritizing individual MCP connectors")
+
     try:
-        # Initialize the ConfigManager with the defined connectors
-        # The SDK will handle loading actual connection details (from env vars or portal)
+        # Initialize the ConfigManager with both regular and array connectors
         config_manager.init_manager(
             config_model=DummyConfig(),
-            connectors=connectors,
+            connectors=regular_connectors,
+            array_connectors=array_connectors,
         )
-        logger.info("ConfigManager initialized with connectors.")
+        logger.info("ConfigManager initialized with regular and array connectors.")
 
-        # Initialize SDK-based MCP manager (now relies on initialized ConfigManager)
+        # Initialize SDK-based MCP manager (now supports array connectors)
         mcp_manager = CMMCPManager()
-        logger.info("CMMCPManager initialized.")
+        logger.info("CMMCPManager initialized with support for array connectors.")
 
         # Initialize SDK-based LLM connector
         llm_connector = CMLLMConnector(config_id=LLM_CONFIG_ID)
@@ -193,7 +227,34 @@ async def chat_completions(
         )
 
         # Process the query - this now handles session management and DB persistence
-        result = await agent.run(latest_user_msg_content, session_id=session_id)
+        try:
+            result = await agent.run(latest_user_msg_content, session_id=session_id)
+        except Exception as agent_error:
+            logger.error(f"Agent runtime error: {agent_error}", exc_info=True)
+
+            # Create a fallback result
+            result_obj = {
+                "response": f"I'm sorry, I encountered an error processing your request: {str(agent_error)}"
+            }
+
+            # Add info about MCP clients for debugging
+            mcp_clients = current_mcp_manager.get_all_clients()
+            if not mcp_clients:
+                result_obj["response"] += (
+                    "\n\nNo MCP clients are currently available. Please check your configuration."
+                )
+            else:
+                result_obj["response"] += (
+                    f"\n\nAvailable MCP clients: {', '.join(mcp_clients.keys())}"
+                )
+
+            # Convert dict to object-like structure
+            class SimpleObject:
+                def __init__(self, **kwargs):
+                    for key, value in kwargs.items():
+                        setattr(self, key, value)
+
+            result = SimpleObject(**result_obj)
 
         # Format the response in OpenAI-compatible format
         response = {
@@ -234,14 +295,22 @@ async def health_check():
     # Add checks for DB connection, config manager status etc. if needed
     if mcp_manager is None or llm_connector is None:
         return {"status": "unhealthy", "reason": "Components failed to initialize"}
-    return {"status": "healthy", "version": "1.0.1"}
+
+    # Get MCP client information for health check
+    try:
+        clients = mcp_manager.get_all_clients()
+        mcp_status = {"total_clients": len(clients), "client_ids": list(clients.keys())}
+    except Exception as e:
+        mcp_status = {"error": str(e), "total_clients": 0}
+
+    return {"status": "healthy", "version": "1.0.3", "mcp_clients": mcp_status}
 
 
 # Add route to check which MCP servers are available
 @app.get("/mcps")
 async def list_mcps(current_mcp_manager: CMMCPManager = Depends(get_mcp_manager_dependency)):
     try:
-        # Get clients from the manager (it checks availability internally now)
+        # Get clients from the manager (it now supports array connectors)
         clients = current_mcp_manager.get_all_clients()
         available_servers = {}
 
@@ -264,7 +333,10 @@ async def list_mcps(current_mcp_manager: CMMCPManager = Depends(get_mcp_manager_
 
         # Get connector info from ConfigManager
         registered_connectors = []
+        array_connectors = []
+
         if config_manager := ConfigManager():  # Check if config_manager is initialized
+            # Regular connectors
             if config_manager.connectors:
                 registered_connectors = [
                     {"config_id": c.config_id, "label": c.label, "type": c.type}
@@ -272,8 +344,21 @@ async def list_mcps(current_mcp_manager: CMMCPManager = Depends(get_mcp_manager_
                     if c.type != "llm"  # Filter out LLM connector
                 ]
 
+            # Array connectors
+            if config_manager.array_connectors:
+                array_connectors = [
+                    {
+                        "config_id": c.config_id,
+                        "label": c.label,
+                        "type": c.type,
+                        "stack_ids": c.stack_ids or [],
+                    }
+                    for c in config_manager.array_connectors
+                ]
+
         return {
             "registered_connectors": registered_connectors,
+            "registered_array_connectors": array_connectors,
             "available_mcp_servers": available_servers,
         }
     except Exception as e:

@@ -61,6 +61,7 @@ class Agent:
         mcp_clients: Optional[Dict[str, MCPClient]] = None,
         db_config_id: str = "AGENT_SESSION_DB",
         debug: bool = False,
+        recursion_limit: int = 50,  # Add recursion limit parameter
     ):
         """
         Initialize the agent with SDK-based connections.
@@ -71,6 +72,7 @@ class Agent:
             mcp_clients: Optional dictionary of MCP clients (overrides mcp_manager)
             db_config_id: Config ID for the database connection in ConfigManager
             debug: Enable debug logging
+            recursion_limit: Maximum number of steps in the LangGraph execution
         """
         # Initialize LLM connector
         self.llm = llm_connector or CMLLMConnector(config_id="LLM")
@@ -98,6 +100,7 @@ class Agent:
                 self.mcp_clients = {}  # Initialize empty if retrieval fails
 
         self.debug = debug
+        self.recursion_limit = recursion_limit
 
         # Database configuration
         self.db_config_id = db_config_id
@@ -108,6 +111,10 @@ class Agent:
         if debug:
             logger.setLevel(logging.DEBUG)
             logger.debug("Debug logging enabled")
+
+        # Check if we have any MCP clients and warn if we don't
+        if not self.mcp_clients:
+            logger.warning("No MCP clients available. The agent will have limited functionality.")
 
         self.graph = self._build_graph().compile()
         logger.info("Agent workflow graph compiled")
@@ -1156,7 +1163,33 @@ class Agent:
         self.current_history.append(user_message)
 
         logger.debug("Invoking agent workflow graph")
-        result = self.graph.invoke(initial_state)
+        try:
+            # Pass recursion_limit to avoid infinite loops in error conditions
+            result = self.graph.invoke(
+                initial_state, config={"recursion_limit": self.recursion_limit}
+            )
+            logger.debug("Agent workflow graph execution completed")
+        except Exception as e:
+            logger.error(f"Error during agent workflow execution: {e}", exc_info=True)
+
+            # Check if we have no MCP clients - this is likely the cause
+            if not self.mcp_clients:
+                error_msg = "No MCP servers are available. Please check your configuration."
+                logger.error(error_msg)
+
+                # Create a fallback result state
+                result = AgentState(
+                    query=query,
+                    session_id=definite_session_id,
+                    response=f"I'm sorry, I can't process your request because I don't have access to any tool servers. {error_msg}",
+                )
+            else:
+                # For other errors, provide a generic error response
+                result = AgentState(
+                    query=query,
+                    session_id=definite_session_id,
+                    response=f"I encountered an error while processing your request: {str(e)}",
+                )
         logger.debug("Agent workflow graph execution completed")
 
         # Save assistant message to database if response was generated
