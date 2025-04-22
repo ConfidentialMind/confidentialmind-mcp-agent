@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Union
+from typing import List, Optional
 
 from confidentialmind_core.config_manager import get_api_parameters
 from openai import AsyncOpenAI

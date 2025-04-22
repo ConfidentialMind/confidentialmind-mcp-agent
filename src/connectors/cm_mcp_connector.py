@@ -1,6 +1,5 @@
 import logging
-import os
-from typing import Dict, List, Optional, Union
+from typing import Dict
 
 from confidentialmind_core.config_manager import ConfigManager, get_api_parameters
 
@@ -20,9 +19,6 @@ class CMMCPManager:
         """Initialize the MCP client manager"""
         self.clients: Dict[str, MCPClient] = {}
         self.config_manager = ConfigManager()
-        self.is_local_dev = os.environ.get("LOCAL_DEV", "").lower() in ("true", "1", "yes")
-        if self.is_local_dev:
-            logger.info("MCP Manager initialized in LOCAL_DEV mode")
 
     def get_client(self, server_id: str) -> MCPClient:
         """
@@ -44,7 +40,7 @@ class CMMCPManager:
         # Check if the connector exists in the config manager (either regular or array)
         connector_exists = False
 
-        # Check regular connectors first - prioritize for LOCAL_DEV mode
+        # Check regular connectors
         if self.config_manager.connectors:
             connector_exists = any(c.config_id == server_id for c in self.config_manager.connectors)
 
@@ -112,7 +108,20 @@ class CMMCPManager:
         """
         clients = {}
 
-        # Known MCP server types we should initialize
+        # Check if config manager has connectors registered
+        has_connectors = (
+            self.config_manager.connectors and len(self.config_manager.connectors) > 0
+        ) or (
+            self.config_manager.array_connectors and len(self.config_manager.array_connectors) > 0
+        )
+
+        if not has_connectors:
+            logger.warning(
+                "ConfigManager has no connectors registered, cannot retrieve MCP clients."
+            )
+            return clients
+
+        # MCP server types we should initialize
         mcp_connector_types = [
             "api",
             "postgres",
@@ -122,7 +131,7 @@ class CMMCPManager:
             "endpoint",  # New type from updated SDK
         ]
 
-        # Process regular connectors first (preferred in LOCAL_DEV mode)
+        # Process regular connectors
         if self.config_manager.connectors:
             for connector in self.config_manager.connectors:
                 # Check if the connector type indicates an MCP server
@@ -135,9 +144,8 @@ class CMMCPManager:
                         # Log warning but continue trying to initialize other clients
                         logger.warning(f"Failed to initialize MCP client for '{server_id}': {e}")
 
-        # Process array connectors if no regular connectors were found
-        # or if we're not in LOCAL_DEV mode
-        if (not clients or not self.is_local_dev) and self.config_manager.array_connectors:
+        # Process array connectors
+        if self.config_manager.array_connectors:
             for array_connector in self.config_manager.array_connectors:
                 # Check if the connector type indicates an MCP server
                 if array_connector.type in mcp_connector_types:
@@ -151,45 +159,7 @@ class CMMCPManager:
                             f"Failed to initialize array MCP client for '{server_id}': {e}"
                         )
 
-        # For LOCAL_DEV mode, try to auto-discover MCP servers from environment variables
-        if self.is_local_dev and not clients:
-            logger.info(
-                "No MCP clients initialized, attempting auto-discovery from environment variables"
-            )
-            self._auto_discover_mcp_servers(clients)
-
         if not clients:
             logger.warning("No MCP clients could be successfully initialized.")
 
         return clients
-
-    def _auto_discover_mcp_servers(self, clients_dict: Dict[str, MCPClient]) -> None:
-        """
-        Auto-discover MCP servers from environment variables in LOCAL_DEV mode.
-        This is a fallback mechanism when no connectors are configured properly.
-
-        Args:
-            clients_dict: Dictionary to populate with discovered clients
-        """
-        # Common server types to check for in environment variables
-        server_types = ["postgres", "rag", "obsidian"]
-
-        for server_id in server_types:
-            env_url_key = f"{server_id}_URL"
-            env_api_key = f"{server_id}_APIKEY"
-
-            url = os.environ.get(env_url_key)
-            if url:
-                try:
-                    # Create headers if API key is available
-                    headers = {}
-                    api_key = os.environ.get(env_api_key)
-                    if api_key:
-                        headers = {"Authorization": f"Bearer {api_key}"}
-
-                    # Create client directly from environment variables
-                    client = MCPClient(base_url=url, headers=headers)
-                    clients_dict[server_id] = client
-                    logger.info(f"Auto-discovered MCP client for '{server_id}' using URL: {url}")
-                except Exception as e:
-                    logger.warning(f"Failed to auto-discover MCP client for '{server_id}': {e}")

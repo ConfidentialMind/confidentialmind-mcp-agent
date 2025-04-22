@@ -21,15 +21,8 @@ from src.core.agent import Agent
 # --- Configuration ---
 # Define config_ids used by the application
 LLM_CONFIG_ID = "LLM"
+MCP_CONFIG_ID = "MCP_SERVERS"  # Single config ID for all MCP servers
 AGENT_SESSION_DB_CONFIG_ID = "AGENT_SESSION_DB"
-
-# MCP server IDs - both individual and array
-MCP_ARRAY_CONFIG_ID = "MCP_SERVERS"  # For array connector approach
-
-# Individual MCP server IDs - used for backward compatibility in local development
-PG_MCP_CONFIG_ID = "postgres"
-RAG_MCP_CONFIG_ID = "rag"
-OBSIDIAN_MCP_CONFIG_ID = "obsidian"
 
 # Global handlers - initialized during lifespan
 mcp_manager: CMMCPManager = None
@@ -63,44 +56,14 @@ async def lifespan(app: FastAPI):
         ),
     ]
 
-    # HYBRID APPROACH: Register both individual MCP connectors and array connector
-    # This provides backward compatibility for local development
-
-    # Individual MCP connectors (backward compatibility)
-    individual_mcp_connectors: list[ConnectorSchema] = [
-        ConnectorSchema(
-            type="api",
-            label="PostgreSQL MCP Server",
-            config_id=PG_MCP_CONFIG_ID,
-        ),
-        ConnectorSchema(
-            type="api",
-            label="RAG MCP Server",
-            config_id=RAG_MCP_CONFIG_ID,
-        ),
-        ConnectorSchema(
-            type="api",
-            label="Obsidian MCP Server",
-            config_id=OBSIDIAN_MCP_CONFIG_ID,
-        ),
-    ]
-
-    # Add individual MCP connectors to the regular connectors list
-    regular_connectors.extend(individual_mcp_connectors)
-
-    # Array connector for MCP services - for stack deployment
+    # Array connector for MCP services - allows dynamic configuration of multiple servers
     array_connectors: list[ArrayConnectorSchema] = [
         ArrayConnectorSchema(
             type="api",
-            label="MCP Servers (Array)",
-            config_id=MCP_ARRAY_CONFIG_ID,
+            label="MCP Servers",
+            config_id=MCP_CONFIG_ID,
         ),
     ]
-
-    # Detect if we're in LOCAL_DEV mode
-    is_local_dev = os.environ.get("LOCAL_DEV", "").lower() in ("true", "1", "yes")
-    if is_local_dev:
-        logger.info("Running in LOCAL_DEV mode, prioritizing individual MCP connectors")
 
     try:
         # Initialize the ConfigManager with both regular and array connectors
@@ -227,34 +190,7 @@ async def chat_completions(
         )
 
         # Process the query - this now handles session management and DB persistence
-        try:
-            result = await agent.run(latest_user_msg_content, session_id=session_id)
-        except Exception as agent_error:
-            logger.error(f"Agent runtime error: {agent_error}", exc_info=True)
-
-            # Create a fallback result
-            result_obj = {
-                "response": f"I'm sorry, I encountered an error processing your request: {str(agent_error)}"
-            }
-
-            # Add info about MCP clients for debugging
-            mcp_clients = current_mcp_manager.get_all_clients()
-            if not mcp_clients:
-                result_obj["response"] += (
-                    "\n\nNo MCP clients are currently available. Please check your configuration."
-                )
-            else:
-                result_obj["response"] += (
-                    f"\n\nAvailable MCP clients: {', '.join(mcp_clients.keys())}"
-                )
-
-            # Convert dict to object-like structure
-            class SimpleObject:
-                def __init__(self, **kwargs):
-                    for key, value in kwargs.items():
-                        setattr(self, key, value)
-
-            result = SimpleObject(**result_obj)
+        result = await agent.run(latest_user_msg_content, session_id=session_id)
 
         # Format the response in OpenAI-compatible format
         response = {
@@ -295,15 +231,7 @@ async def health_check():
     # Add checks for DB connection, config manager status etc. if needed
     if mcp_manager is None or llm_connector is None:
         return {"status": "unhealthy", "reason": "Components failed to initialize"}
-
-    # Get MCP client information for health check
-    try:
-        clients = mcp_manager.get_all_clients()
-        mcp_status = {"total_clients": len(clients), "client_ids": list(clients.keys())}
-    except Exception as e:
-        mcp_status = {"error": str(e), "total_clients": 0}
-
-    return {"status": "healthy", "version": "1.0.3", "mcp_clients": mcp_status}
+    return {"status": "healthy", "version": "1.0.2"}  # Updated version
 
 
 # Add route to check which MCP servers are available
