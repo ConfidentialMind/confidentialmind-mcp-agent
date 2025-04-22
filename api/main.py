@@ -21,7 +21,7 @@ from src.core.agent import Agent
 # --- Configuration ---
 # Define config_ids used by the application
 LLM_CONFIG_ID = "LLM"
-MCP_CONFIG_ID = "MCP_SERVERS"  # Single config ID for all MCP servers
+MCP_CONFIG_ID = "agentTools"  # Single config ID for all MCP servers
 AGENT_SESSION_DB_CONFIG_ID = "AGENT_SESSION_DB"
 
 # Global handlers - initialized during lifespan
@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
     # Array connector for MCP services - allows dynamic configuration of multiple servers
     array_connectors: list[ArrayConnectorSchema] = [
         ArrayConnectorSchema(
-            type="api",
+            type="agent_tool",
             label="MCP Servers",
             config_id=MCP_CONFIG_ID,
         ),
