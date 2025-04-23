@@ -29,9 +29,9 @@ class AgentPostgresSettings(BaseSettings):
     # Default connection settings
     database_host: str = "localhost"
     database_port: int = 5432
-    database_user: str = "postgres"
-    database_password: str = "postgres"
-    database_name: str = "agents"
+    database_user: str = "app"
+    database_password: str = "testpass"
+    database_name: str = "postgres"
 
     # Pool settings
     min_connections: int = 2

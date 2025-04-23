@@ -28,7 +28,7 @@ from src.core.agent_db_migration import AgentMigration
 # Define config_ids used by the application
 LLM_CONFIG_ID = "LLM"
 MCP_CONFIG_ID = "agentTools"  # Single config ID for all MCP servers
-AGENT_SESSION_DB_CONFIG_ID = "AGENT_SESSION_DB"
+AGENT_SESSION_DB_CONFIG_ID = "DATABASE"
 
 # Global handlers - initialized during lifespan
 mcp_manager: CMMCPManager = None

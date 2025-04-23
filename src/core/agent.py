@@ -60,7 +60,7 @@ class Agent:
         llm_connector: Optional[CMLLMConnector] = None,
         mcp_manager: Optional[CMMCPManager] = None,
         mcp_clients: Optional[Dict[str, MCPClient]] = None,
-        db_config_id: str = "AGENT_SESSION_DB",
+        db_config_id: str = "DATABASE",
         debug: bool = False,
     ):
         """
@@ -104,6 +104,8 @@ class Agent:
         self.db_config_id = db_config_id
         self.db = AgentDatabase(settings=AgentPostgresSettings())
         self.current_history = []  # Temporary storage for current conversation
+
+        self._db_init_task = asyncio.create_task(self._initialize_database())
 
         # Set logging level based on debug flag
         if debug:
