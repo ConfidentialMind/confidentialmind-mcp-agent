@@ -57,6 +57,7 @@ class Agent:
 
     def __init__(
         self,
+        agent_db: AgentDatabase,
         llm_connector: Optional[CMLLMConnector] = None,
         mcp_manager: Optional[CMMCPManager] = None,
         mcp_clients: Optional[Dict[str, MCPClient]] = None,
@@ -67,6 +68,7 @@ class Agent:
         Initialize the agent with SDK-based connections.
 
         Args:
+            agent:db: An initialized and connected AgentDatabase instance.
             llm_connector: SDK-based LLM connector (will create if None)
             mcp_manager: SDK-based MCP manager (will create if None)
             mcp_clients: Optional dictionary of MCP clients (overrides mcp_manager)
@@ -101,11 +103,12 @@ class Agent:
         self.debug = debug
 
         # Database configuration
-        self.db_config_id = db_config_id
-        self.db = AgentDatabase(settings=AgentPostgresSettings())
+        # self.db_config_id = db_config_id
+        # self.db = AgentDatabase(settings=AgentPostgresSettings())
+        self.db = agent_db
         self.current_history = []  # Temporary storage for current conversation
 
-        self._db_init_task = asyncio.create_task(self._initialize_database())
+        # self._db_init_task = asyncio.create_task(self._initialize_database())
 
         # Set logging level based on debug flag
         if debug:
@@ -115,35 +118,35 @@ class Agent:
         self.graph = self._build_graph().compile()
         logger.info("Agent workflow graph compiled")
 
-    async def _initialize_database(self) -> bool:
-        """
-        Initialize database connection and ensure schema is correct.
-        Returns True if database is successfully connected and schema is valid.
-        """
-        try:
-            # Import the migration class
-            from src.core.agent_db_migration import AgentMigration
-
-            # Connect to database
-            db_url = await fetch_agent_db_url(self.db_config_id)
-            if not await self.db.connect(db_url):
-                logger.warning("Failed to connect to database during initialization")
-                return False
-
-            # Check and apply migrations if needed
-            migrator = AgentMigration(db=self.db)
-            migration_result = await migrator.ensure_schema()
-
-            if migration_result:
-                logger.info("Database schema verification/migration completed successfully")
-            else:
-                logger.warning("Database schema migration encountered issues")
-
-            return migration_result
-
-        except Exception as e:
-            logger.error(f"Error initializing database: {str(e)}", exc_info=True)
-            return False
+    # async def _initialize_database(self) -> bool:
+    #     """
+    #     Initialize database connection and ensure schema is correct.
+    #     Returns True if database is successfully connected and schema is valid.
+    #     """
+    #     try:
+    #         # Import the migration class
+    #         from src.core.agent_db_migration import AgentMigration
+    #
+    #         # Connect to database
+    #         db_url = await fetch_agent_db_url(self.db_config_id)
+    #         if not await self.db.connect(db_url):
+    #             logger.warning("Failed to connect to database during initialization")
+    #             return False
+    #
+    #         # Check and apply migrations if needed
+    #         migrator = AgentMigration(db=self.db)
+    #         migration_result = await migrator.ensure_schema()
+    #
+    #         if migration_result:
+    #             logger.info("Database schema verification/migration completed successfully")
+    #         else:
+    #             logger.warning("Database schema migration encountered issues")
+    #
+    #         return migration_result
+    #
+    #     except Exception as e:
+    #         logger.error(f"Error initializing database: {str(e)}", exc_info=True)
+    #         return False
 
     async def get_history(self, session_id: str) -> List[Message]:
         """Get the conversation history for a session from the database.
@@ -249,7 +252,13 @@ class Agent:
             logger.info(f"Saved message for session {session_id} with order {message_order}")
             return True
         except Exception as e:
-            logger.error(f"Error saving message for session {session_id}: {e}")
+            # Check if it's specifically a connection error vs query error
+            if not self.db.is_connected():
+                logger.warning(
+                    f"Database not connected when trying to save message for session {session_id}. Error: {self.db.last_error()}"
+                )
+            else:
+                logger.error(f"Error saving message for session {session_id}: {e}")
             return False  # Return False on error
 
     def _build_graph(self) -> StateGraph:
@@ -1137,37 +1146,32 @@ class Agent:
         definite_session_id = session_id or str(uuid.uuid4())
         logger.info(f"Using session ID: {definite_session_id}")
 
-        # Wait for database initialization to complete if it's still running
-        try:
-            if hasattr(self, "_db_init_task") and not self._db_init_task.done():
-                logger.debug("Waiting for database initialization to complete")
-                await asyncio.wait_for(self._db_init_task, timeout=10.0)  # 10 second timeout
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Database initialization timed out, continuing without guaranteed schema"
-            )
-        except Exception as e:
-            logger.error(f"Error waiting for database initialization: {e}")
-
         # Load conversation history from database
-        try:
-            if self.db.is_connected():
+        # Check connection status *before* attempting to load
+        if self.db.is_connected():
+            try:
                 self.current_history = await self._load_history(definite_session_id)
                 logger.info(
                     f"Loaded {len(self.current_history)} messages from database for session {definite_session_id}"
                 )
-            else:
-                logger.warning("Database not connected, using empty conversation history")
-                self.current_history = []
-        except Exception as e:
-            logger.error(f"Error loading conversation history: {e}", exc_info=True)
-            self.current_history = []  # Use empty history on error
+            except Exception as e:
+                logger.error(f"Error loading conversation history: {e}", exc_info=True)
+                self.current_history = []  # Use empty history on error
+        else:
+            # Log the specific reason if available
+            conn_error = self.db.last_error()
+            logger.warning(
+                f"Database not connected at start of run, using empty conversation history. Last Error: {conn_error}"
+            )
+            self.current_history = []
 
-        # Check for conversation management commands
+        # Check for conversation management commands (no DB needed for these checks)
         if query.strip().lower() == "clear history":
             logger.info("Clearing conversation history")
-            if self.db.is_connected():
+            if self.db.is_connected():  # Check connection before attempting clear
                 await self.clear_history(definite_session_id)
+            else:
+                logger.warning("Cannot clear history, database not connected.")
             self.current_history = []
             response_state = AgentState(query=query, session_id=definite_session_id)
             response_state.response = "Conversation history has been cleared."
@@ -1176,6 +1180,8 @@ class Agent:
         if query.strip().lower() == "show history":
             logger.info("Showing conversation history")
             history_text = "Conversation history:\n\n"
+            if not self.current_history:
+                history_text += "(History is empty or could not be loaded)\n"
             for i, message in enumerate(self.current_history):
                 history_text += f"{i + 1}. {message}\n"
             response_state = AgentState(query=query, session_id=definite_session_id)
@@ -1187,38 +1193,50 @@ class Agent:
 
         # Save user message to database
         user_message = Message(role="user", content=query)
-        if self.db.is_connected():
+        if self.db.is_connected():  # Check connection before saving
             await self._save_message(definite_session_id, user_message)
-        self.current_history.append(user_message)
+        else:
+            logger.warning(
+                f"Could not save user message for session {definite_session_id}, database not connected."
+            )
+            # Still add to in-memory history for this run
+            self.current_history.append(user_message)
 
         logger.debug("Invoking agent workflow graph")
-        result = self.graph.invoke(initial_state)
-        logger.debug("Agent workflow graph execution completed")
+        try:
+            result = self.graph.invoke(initial_state)
+            logger.debug("Agent workflow graph execution completed")
 
-        # Save assistant message to database if response was generated
-        result_state = result
-        # Handle different return types from newer LangGraph versions
-        if isinstance(result, dict):
-            logger.debug("Result is dictionary, extracting state")
-            # Check if state is directly in the dictionary
-            if "state" in result:
-                logger.debug("Found 'state' in result dictionary")
+            # --- Process result and save assistant message ---
+            result_state = result  # Assume result is the state directly for simplicity
+
+            # Handle different return types from newer LangGraph versions if necessary
+            if isinstance(result, dict) and "state" in result:
                 result_state = result["state"]
-            # If there's a response, create a new state with it
-            elif "response" in result:
-                logger.debug("Found 'response' in result dictionary")
+            elif isinstance(result, dict) and "response" in result:
+                # Reconstruct state if needed, this part might need adjustment
                 result_state = AgentState(query=query, session_id=definite_session_id)
-                result_state.response = result["response"]
-                if "thoughts" in result:
-                    result_state.thoughts = result["thoughts"]
-                if "mcp_results" in result:
-                    result_state.mcp_results = result["mcp_results"]
-                if "error" in result:
-                    result_state.error = result["error"]
+                result_state.response = result.get("response")
+                result_state.thoughts = result.get("thoughts", [])
+                result_state.mcp_results = result.get("mcp_results", {})
+                result_state.error = result.get("error")
 
-        # If result_state has an assistant message to save, save it to the database
-        if result_state.response and self.db.is_connected():
-            assistant_message = Message(role="assistant", content=result_state.response)
-            await self._save_message(definite_session_id, assistant_message)
+            # Save assistant message to database if response was generated
+            if hasattr(result_state, "response") and result_state.response:
+                if self.db.is_connected():  # Check connection before saving
+                    assistant_message = Message(role="assistant", content=result_state.response)
+                    await self._save_message(definite_session_id, assistant_message)
+                else:
+                    logger.warning(
+                        f"Could not save assistant response for session {definite_session_id}, database not connected."
+                    )
+            # --- End Process result ---
+
+        except Exception as e:
+            logger.error(f"Error during agent graph execution: {e}", exc_info=True)
+            # Return an error state
+            result_state = AgentState(query=query, session_id=definite_session_id)
+            result_state.error = f"Agent execution failed: {e}"
+            result_state.response = "I encountered an error processing your request."
 
         return result_state
