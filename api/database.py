@@ -12,7 +12,7 @@ from src.core.agent import Message
 
 # Get database URL from environment variables with a default for local development
 DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@db:5432/agents"
+    "AGENT_SESSION_DB_URL", "postgresql+asyncpg://postgres:postgres@db:5432/agents"
 )
 
 # Create async engine

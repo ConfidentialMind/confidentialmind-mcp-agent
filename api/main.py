@@ -17,6 +17,12 @@ from pydantic import BaseModel, Field
 from src.connectors.cm_llm_connector import CMLLMConnector
 from src.connectors.cm_mcp_connector import CMMCPManager
 from src.core.agent import Agent
+from src.core.agent_db_connection import (
+    AgentDatabase,
+    AgentPostgresSettings,
+    fetch_agent_db_url,
+)
+from src.core.agent_db_migration import AgentMigration
 
 # --- Configuration ---
 # Define config_ids used by the application
@@ -88,6 +94,48 @@ async def lifespan(app: FastAPI):
         # For now, we log the error and continue, but endpoints might fail
         mcp_manager = None  # Ensure manager is None if init fails
         llm_connector = None
+
+    try:
+        logger.info("Initializing database connection and verifying schema")
+
+        # Create database connection
+        db_settings = AgentPostgresSettings()
+        agent_db = AgentDatabase(settings=db_settings)
+
+        # Fetch database URL
+        db_url = await fetch_agent_db_url(AGENT_SESSION_DB_CONFIG_ID)
+        if db_url:
+            # Connect to database
+            if await agent_db.connect(db_url):
+                logger.info("Successfully connected to agent database")
+
+                # Initialize and run schema verification/migration
+                migrator = AgentMigration(db=agent_db)
+
+                # Verify schema structure and run migrations if needed
+                schema_valid, missing_elements = await migrator.check_schema_status()
+
+                if schema_valid:
+                    logger.info("Database schema structure verification passed")
+                else:
+                    logger.warning(
+                        f"Schema verification failed. Missing elements: {missing_elements}"
+                    )
+                    logger.info("Running schema migration to fix issues")
+
+                    # Apply migrations
+                    migration_result = await migrator.ensure_schema()
+                    if migration_result:
+                        logger.info("Database schema migration completed successfully")
+                    else:
+                        logger.warning("Database schema migration encountered issues")
+            else:
+                logger.error("Failed to connect to agent database during startup")
+        else:
+            logger.warning("No database URL available from SDK during startup")
+    except Exception as e:
+        logger.error(f"Error initializing database during startup: {e}", exc_info=True)
+        logger.warning("Continuing startup despite database initialization error")
 
     yield  # Application runs here
 

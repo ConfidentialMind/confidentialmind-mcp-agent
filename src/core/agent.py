@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -111,6 +112,36 @@ class Agent:
 
         self.graph = self._build_graph().compile()
         logger.info("Agent workflow graph compiled")
+
+    async def _initialize_database(self) -> bool:
+        """
+        Initialize database connection and ensure schema is correct.
+        Returns True if database is successfully connected and schema is valid.
+        """
+        try:
+            # Import the migration class
+            from src.core.agent_db_migration import AgentMigration
+
+            # Connect to database
+            db_url = await fetch_agent_db_url(self.db_config_id)
+            if not await self.db.connect(db_url):
+                logger.warning("Failed to connect to database during initialization")
+                return False
+
+            # Check and apply migrations if needed
+            migrator = AgentMigration(db=self.db)
+            migration_result = await migrator.ensure_schema()
+
+            if migration_result:
+                logger.info("Database schema verification/migration completed successfully")
+            else:
+                logger.warning("Database schema migration encountered issues")
+
+            return migration_result
+
+        except Exception as e:
+            logger.error(f"Error initializing database: {str(e)}", exc_info=True)
+            return False
 
     async def get_history(self, session_id: str) -> List[Message]:
         """Get the conversation history for a session from the database.
@@ -1104,14 +1135,17 @@ class Agent:
         definite_session_id = session_id or str(uuid.uuid4())
         logger.info(f"Using session ID: {definite_session_id}")
 
-        # Connect to database if not already connected
+        # Wait for database initialization to complete if it's still running
         try:
-            # Fetch database URL with retry logic
-            db_url = await fetch_agent_db_url(self.db_config_id)
-            await self.db.connect(db_url)
+            if hasattr(self, "_db_init_task") and not self._db_init_task.done():
+                logger.debug("Waiting for database initialization to complete")
+                await asyncio.wait_for(self._db_init_task, timeout=10.0)  # 10 second timeout
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Database initialization timed out, continuing without guaranteed schema"
+            )
         except Exception as e:
-            logger.error(f"Database connection error: {e}", exc_info=True)
-            # Continue without database connection - we'll handle history in memory only
+            logger.error(f"Error waiting for database initialization: {e}")
 
         # Load conversation history from database
         try:
