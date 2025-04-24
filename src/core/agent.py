@@ -478,7 +478,7 @@ class Agent:
             "plan": "high-level plan description",
             "actions": [
                 {{
-                    "server_id": "postgres", // REQUIRED: Specify which server to use: postgres or rag
+                    "server_id": "agentTools", // REQUIRED: Specify which server to use: postgres or rag
                     "mcp_method": "mcp_readResource", // or mcp_callTool, etc.
                     "params": {{ // Parameters for the MCP method
                         "uri": "postgres://..." // for readResource

@@ -5,7 +5,6 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Dict, List, Literal, Optional
-from uuid import uuid4
 
 from confidentialmind_core.config_manager import (
     ArrayConnectorSchema,
@@ -221,10 +220,10 @@ class ChatCompletionRequest(BaseModel):
 
 
 class ChatCompletionResponse(BaseModel):
-    id: str = Field(default_factory=lambda: f"chatcmpl-{uuid4().hex}")
+    id: str = Field(..., example="chatcmpl-123")
     object: Literal["chat.completion"] = "chat.completion"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
+    created: int = Field(..., example=1677858242)
+    model: str = Field(..., example="cm-llm")
     choices: List[Dict] = Field(...)
     usage: Dict = Field(...)
 
