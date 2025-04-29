@@ -5,24 +5,26 @@ import logging
 import re
 import sys
 import uuid
-from typing import Any, Dict, List, Optional
+from contextlib import AsyncExitStack
+from typing import Any, Dict, List, Optional, Union
 
 from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import mcp.types as mcp_types
-
-# Import SDK ClientSession and types
 from mcp import ClientSession, McpError
-
-# Use CM connectors for LLM and MCP session management
+from mcp.types import (
+    INTERNAL_ERROR,
+    INVALID_PARAMS,
+    METHOD_NOT_FOUND,
+    CallToolResult,
+    ListResourcesResult,
+    ListToolsResult,
+    ReadResourceResult,
+)
 from src.connectors.cm_llm_connector import CMLLMConnector
 from src.connectors.cm_mcp_connector import CMMCPManager
-
-# Database imports remain the same
-from src.core.agent_db_connection import AgentDatabase  # Assuming this is used for history
-
-# from src.core.agent_db_migration import AgentMigration # Migration handled elsewhere
+from src.core.agent_db_connection import AgentDatabase
 
 # Configure logging
 logging.basicConfig(
@@ -44,26 +46,24 @@ class Message(BaseModel):
 
 
 class AgentState(BaseModel):
-    """Agent workflow state - updated for SDK types"""
+    """Agent workflow state."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     query: str = ""
     session_id: Optional[str] = None
-    # Store raw results keyed by a unique identifier for the action step
-    mcp_results: Dict[str, Any] = Field(default_factory=dict)  # Store raw SDK results or McpError
+    mcp_results: Dict[
+        str,
+        Union[CallToolResult, ReadResourceResult, ListResourcesResult, ListToolsResult, McpError],
+    ] = Field(default_factory=dict)
     thoughts: List[str] = Field(default_factory=list)
     response: Optional[str] = None
     error: Optional[str] = None
-    # Removed mcp_options, use execution_context instead
-    planned_actions: List[Dict[str, Any]] = Field(
-        default_factory=list
-    )  # Plan still uses dict structure
+    planned_actions: List[Dict[str, Any]] = Field(default_factory=list)
     current_action_index: int = 0
     needs_more_info: bool = False
     follow_up_question: Optional[str] = None
-    # available_schemas now derived from context
-    execution_context: Dict[str, Any] = Field(
-        default_factory=dict
-    )  # Store tools, resources, errors etc.
+    execution_context: Dict[str, Any] = Field(default_factory=dict)
     requires_replanning: bool = False
 
 
@@ -99,8 +99,19 @@ class Agent:
             logger.setLevel(logging.DEBUG)
             logger.debug("Debug logging enabled")
 
+        self._exit_stack = AsyncExitStack()
+
         self.graph = self._build_graph().compile()
         logger.info("Agent workflow graph compiled")
+
+    async def __aenter__(self):
+        await self._exit_stack.__aenter__()
+        # Add resource cleanup
+        self._exit_stack.push_async_callback(self.mcp_manager.close_all_sessions)
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self._exit_stack.__aexit__(exc_type, exc_val, exc_tb)
 
     # --- History Management (using AgentDatabase, assumed similar methods) ---
     async def _load_history(self, session_id: str) -> List[Message]:
@@ -386,7 +397,7 @@ class Agent:
         Think step-by-step to create a plan. Your plan should be a sequence of actions.
         1. Identify the goal of the user query.
         2. Determine which server(s) and tool(s)/resource(s) are needed.
-        3. If database access is needed (server_id 'postgres'):
+        3. If database access is needed (server_id 'agentTools'):
            - Use `listResources` or the available resources list above to find table schema URIs.
            - Use `readResource` with the correct URI (e.g., postgres://.../schema_name/table_name/schema) to get column details *before* writing a query.
            - Use the `query` tool via `callTool` for executing SQL. Ensure SQL uses schema qualification (e.g., `schema_name.table_name`).
@@ -453,30 +464,30 @@ class Agent:
         server_id = action_spec.get("server_id")
         mcp_method = action_spec.get("mcp_method")
         params = action_spec.get("params", {})
-        action_key = (
-            f"action_{state.current_action_index}_{server_id}_{mcp_method}"  # Unique key for result
-        )
+        action_key = f"action_{state.current_action_index}_{server_id}_{mcp_method}"
 
+        # Validate action parameters
         if not server_id or not mcp_method:
-            error_msg = f"Invalid action specification at index {state.current_action_index}: Missing server_id or mcp_method."
-            logger.error(error_msg)
-            state.thoughts.append(f"Error: {error_msg}")
-            state.mcp_results[action_key] = McpError(
-                mcp_types.ErrorData(code=-32602, message=error_msg)
+            error = McpError(
+                mcp_types.ErrorData(
+                    code=INVALID_PARAMS, message="Invalid action: Missing server_id or mcp_method"
+                )
             )
+            state.mcp_results[action_key] = error
             state.current_action_index += 1
-            state.error = error_msg  # Signal critical error
+            state.error = str(error.error.message)
             return state
 
+        # Get the MCP session
         if server_id not in self.mcp_sessions:
-            error_msg = f"MCP session for server_id '{server_id}' not available."
-            logger.error(error_msg)
-            state.thoughts.append(f"Error: {error_msg}")
-            state.mcp_results[action_key] = McpError(
-                mcp_types.ErrorData(code=-32000, message=error_msg)
+            error = McpError(
+                mcp_types.ErrorData(
+                    code=METHOD_NOT_FOUND, message=f"MCP session for '{server_id}' not available"
+                )
             )
+            state.mcp_results[action_key] = error
             state.current_action_index += 1
-            state.error = error_msg  # Signal critical error
+            state.error = str(error.error.message)
             return state
 
         session = self.mcp_sessions[server_id]
@@ -492,55 +503,60 @@ class Agent:
                 result = await session.list_resources()
             elif mcp_method == "readResource":
                 if "uri" not in params:
-                    raise ValueError("Missing 'uri' parameter")
+                    raise McpError(
+                        mcp_types.ErrorData(
+                            code=INVALID_PARAMS, message="Missing 'uri' parameter for readResource"
+                        )
+                    )
                 result = await session.read_resource(uri=params["uri"])
             elif mcp_method == "listTools":
                 result = await session.list_tools()
             elif mcp_method == "callTool":
                 if "name" not in params:
-                    raise ValueError("Missing 'name' parameter")
-                # TODO: Add schema qualification logic back here if needed, similar to previous version
-                # sql = params.get("arguments", {}).get("sql")
-                # if server_id == "postgres" and params["name"] == "query" and sql:
-                #     enhanced_sql = self._ensure_schema_qualification(sql, state) # Ensure this method exists or adapt
-                #     if enhanced_sql != sql:
-                #          logger.info(f"Enhanced SQL: {enhanced_sql}")
-                #          params["arguments"]["sql"] = enhanced_sql
+                    raise McpError(
+                        mcp_types.ErrorData(
+                            code=INVALID_PARAMS, message="Missing 'name' parameter for callTool"
+                        )
+                    )
                 result = await session.call_tool(
                     name=params["name"], arguments=params.get("arguments")
                 )
             else:
-                raise ValueError(f"Unsupported MCP method: {mcp_method}")
+                raise McpError(
+                    mcp_types.ErrorData(
+                        code=METHOD_NOT_FOUND, message=f"Unsupported MCP method: {mcp_method}"
+                    )
+                )
 
             logger.debug(f"Action successful: {action_label}")
             state.thoughts.append(f"Action Result: Success for {action_label}")
-            state.mcp_results[action_key] = result  # Store the raw SDK result object
+            state.mcp_results[action_key] = result
 
             # Specific handling for CallToolResult to check isError
             if isinstance(result, mcp_types.CallToolResult) and result.isError:
                 error_msg = "Tool execution failed."
                 if result.content and isinstance(result.content[0], mcp_types.TextContent):
                     error_msg = result.content[0].text
-                logger.warning(f"Tool call {action_label} reported error: {error_msg}")
-                state.thoughts.append(f"Action Result: Tool error for {action_label}: {error_msg}")
-                # Store error info for evaluation/replanning
+                logger.warning(f"Tool call reported error: {error_msg}")
+                state.thoughts.append(f"Action Result: Tool error: {error_msg}")
                 state.mcp_results[action_key] = McpError(
-                    mcp_types.ErrorData(code=-32001, message=error_msg)
+                    mcp_types.ErrorData(code=INTERNAL_ERROR, message=error_msg)
                 )
 
         except McpError as e:
-            error_msg = e.error.message
-            logger.error(f"MCPError executing {action_label}: {error_msg}", exc_info=self.debug)
-            state.thoughts.append(f"Action Result: MCP Error for {action_label}: {error_msg}")
-            state.mcp_results[action_key] = e  # Store the McpError object
+            # Handle SDK errors
+            state.mcp_results[action_key] = e
+            state.thoughts.append(f"Action Result: MCP Error: {e.error.message}")
+            logger.error(f"MCP Error executing {action_label}: {e.error.message}")
         except Exception as e:
-            error_msg = f"Unexpected error executing {action_label}: {str(e)}"
-            logger.error(error_msg, exc_info=self.debug)
-            state.thoughts.append(f"Action Result: Unexpected Error for {action_label}: {str(e)}")
-            state.mcp_results[action_key] = McpError(
-                mcp_types.ErrorData(code=-32000, message=error_msg)
+            # Convert other errors to McpError for consistency
+            error = McpError(
+                mcp_types.ErrorData(code=INTERNAL_ERROR, message=f"Unexpected error: {str(e)}")
             )
-            state.error = error_msg  # Signal critical error if unexpected exception occurs
+            state.mcp_results[action_key] = error
+            state.thoughts.append(f"Action Result: Unexpected Error: {str(e)}")
+            state.error = f"Unexpected error executing {action_label}: {str(e)}"
+            logger.error(f"Unexpected error executing {action_label}", exc_info=True)
 
         state.current_action_index += 1
         return state
@@ -820,54 +836,58 @@ class Agent:
         )
 
     def _format_results(self, results: Dict[str, Any]) -> str:
-        """Format MCP results for the final response generation prompt."""
+        """Format MCP results leveraging SDK types for clarity."""
         formatted = ""
         for key, result in results.items():
             formatted += f"--- Result for {key} ---\n"
+
             if isinstance(result, McpError):
-                formatted += f"Type: Error\nMessage: {result.error.message}\n"
+                formatted += (
+                    f"Type: Error\nCode: {result.error.code}\nMessage: {result.error.message}\n"
+                )
             elif isinstance(result, mcp_types.ListResourcesResult):
                 formatted += f"Type: ListResourcesResult\nResources:\n"
-                if result.resources:
-                    for res in result.resources:
-                        formatted += f"  - URI: {res.uri}, Name: {res.name}, Type: {res.mimeType}\n"
-                else:
-                    formatted += "  (No resources listed)\n"
+                for res in result.resources:
+                    formatted += f"  - URI: {res.uri}, Name: {res.name}, Type: {res.mimeType}\n"
             elif isinstance(result, mcp_types.ReadResourceResult):
-                formatted += f"Type: ReadResourceResult\nContent:\n"
-                if result.contents:
-                    content = result.contents[0]  # Assume single content for now
+                formatted += f"Type: ReadResourceResult\n"
+                for content in result.contents:
                     if isinstance(content, mcp_types.TextResourceContents):
-                        formatted += f"  URI: {content.uri}, Type: {content.mimeType}\n  Text: {content.text[:200]}...\n"  # Truncate long text
-                    elif isinstance(content, mcp_types.BlobResourceContents):
-                        formatted += f"  URI: {content.uri}, Type: {content.mimeType}\n  Blob: (base64 data omitted)\n"
-                else:
-                    formatted += "  (No content returned)\n"
+                        text_preview = (
+                            (content.text[:200] + "...")
+                            if len(content.text) > 200
+                            else content.text
+                        )
+                        formatted += f"  URI: {content.uri}, Type: {content.mimeType}\n  Text: {text_preview}\n"
+                    else:
+                        formatted += (
+                            f"  URI: {content.uri}, Type: {content.mimeType} (binary content)\n"
+                        )
             elif isinstance(result, mcp_types.ListToolsResult):
                 formatted += f"Type: ListToolsResult\nTools:\n"
-                if result.tools:
-                    for tool in result.tools:
-                        schema_str = json.dumps(tool.inputSchema) if tool.inputSchema else "{}"
-                        formatted += f"  - Name: {tool.name}, Desc: {tool.description}, Schema: {schema_str}\n"
-                else:
-                    formatted += "  (No tools listed)\n"
+                for tool in result.tools:
+                    formatted += (
+                        f"  - Name: {tool.name}\n    Description: {tool.description or 'N/A'}\n"
+                    )
             elif isinstance(result, mcp_types.CallToolResult):
                 formatted += f"Type: CallToolResult\nError: {result.isError}\nContent:\n"
-                if result.content:
-                    for content_item in result.content:
-                        if isinstance(content_item, mcp_types.TextContent):
-                            formatted += f"  - Text: {content_item.text[:200]}...\n"  # Truncate
-                        elif isinstance(content_item, mcp_types.ImageContent):
-                            formatted += (
-                                f"  - Image: Type={content_item.mimeType}, (data omitted)\n"
-                            )
-                        elif isinstance(content_item, mcp_types.EmbeddedResource):
-                            formatted += f"  - Embedded Resource: URI={content_item.resource.uri}, Type={content_item.resource.mimeType}\n"  # Omit content
-                else:
-                    formatted += "  (No content returned)\n"
+                for content in result.content:
+                    if isinstance(content, mcp_types.TextContent):
+                        text_preview = (
+                            (content.text[:200] + "...")
+                            if len(content.text) > 200
+                            else content.text
+                        )
+                        formatted += f"  - Text: {text_preview}\n"
+                    elif isinstance(content, mcp_types.ImageContent):
+                        formatted += f"  - Image: Type={content.mimeType}\n"
+                    elif isinstance(content, mcp_types.EmbeddedResource):
+                        formatted += f"  - Embedded Resource: Type={content.resource.mimeType}\n"
             else:
-                formatted += f"Type: Unknown ({type(result).__name__})\nData: {str(result)[:200]}...\n"  # Truncate unknown
+                formatted += f"Type: Unknown ({type(result).__name__})\n"
+
             formatted += "---\n"
+
         return formatted if formatted else "No results available."
 
     def _parse_json_response(self, response: str) -> Dict[str, Any]:

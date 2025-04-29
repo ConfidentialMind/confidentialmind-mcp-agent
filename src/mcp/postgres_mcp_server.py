@@ -5,6 +5,7 @@ A Model Context Protocol server for PostgreSQL database access.
 Provides tools for querying and schema exploration.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -492,6 +493,8 @@ if __name__ == "__main__":
     try:
         # Run the server with selected transport
         mcp.run(transport=transport)
+    except asyncio.exceptions.CancelledError:
+        logger.info("Server shutdown requested.")
     except Exception as e:
         logger.critical(f"Server failed to start or exited unexpectedly: {e}", exc_info=True)
         import sys
