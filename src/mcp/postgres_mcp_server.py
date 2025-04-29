@@ -1,21 +1,27 @@
-# src/mcp/postgres_mcp_server.py
+"""
+PostgreSQL MCP Server
+
+A Model Context Protocol server for PostgreSQL database access.
+Provides tools for querying and schema exploration.
+"""
+
 import json
 import logging
 import os
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional, cast
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 import asyncpg
 import backoff
 from confidentialmind_core.config_manager import get_api_parameters, load_environment
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 import mcp.types as types
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.session import ServerSession
+from mcp.server.fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 
 # Configure logging
@@ -24,9 +30,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("postgres-mcp-server")
 
-
 # --- Constants ---
-DATABASE_CONNECTOR_ID = "DATABASE"  # Do not change
+DATABASE_CONNECTOR_ID = "DATABASE"  # Identifier for the database connector
+DEFAULT_READ_TIMEOUT = 60.0  # Default query timeout in seconds
+
+# --- Environment Settings ---
+LOCAL_DEV = os.environ.get("LOCAL_DEV", "").lower() in ("true", "1", "yes")
+DEBUG_MODE = os.environ.get("DEBUG", "").lower() in ("true", "1", "yes")
+
+# Set log level based on debug mode
+if DEBUG_MODE:
+    logging.getLogger("postgres-mcp-server").setLevel(logging.DEBUG)
 
 
 # --- Backoff Configuration ---
@@ -36,13 +50,16 @@ def get_backoff_config() -> Dict[str, Any]:
         "max_tries": 5,
         "max_time": 30,
         "on_backoff": lambda details: logger.info(
-            f"DB Reconnection attempt {details['tries']} failed. Retrying in {details['wait']} seconds"
+            f"DB Reconnection attempt {details['tries']} failed. "
+            f"Retrying in {details['wait']} seconds"
         ),
     }
 
 
 # --- Pydantic Settings for Database Connection ---
 class PostgresSettings(BaseSettings):
+    """PostgreSQL connection settings with fallback defaults."""
+
     database_host: str = "localhost"
     database_port: int = 5432
     database_user: str = "app"
@@ -51,7 +68,7 @@ class PostgresSettings(BaseSettings):
     min_connections: int = 2
     max_connections: int = 10
     connection_timeout: float = 30.0
-    command_timeout: float = 60.0
+    command_timeout: float = DEFAULT_READ_TIMEOUT
     sdk_db_url: Optional[str] = None  # Store the URL fetched during startup
 
     def get_connection_string(self) -> str:
@@ -71,7 +88,7 @@ class PostgresSettings(BaseSettings):
         return dsn
 
     def _get_safe_connection_string(self, connection_string: Optional[str]) -> str:
-        # Helper to mask password for logging (implementation unchanged)
+        """Return a connection string with password masked for logging."""
         if not connection_string:
             return "DSN not configured"
         try:
@@ -88,17 +105,30 @@ class PostgresSettings(BaseSettings):
             return "postgresql://user:****@host:port/database"
 
 
-# --- Database Connection Management (Simplified for Lifespan) ---
+# --- Database Connection Management ---
 @dataclass
 class Database:
+    """Database connection pool wrapper with query execution methods."""
+
     pool: asyncpg.pool.Pool
 
-    async def execute_query(self, query: str, *args, fetch_type: str = "all"):
-        """Execute a database query using the pool."""
+    async def execute_query(
+        self, query: str, *args, fetch_type: Literal["all", "row", "val", "none"] = "all"
+    ) -> Any:
+        """Execute a database query using the pool.
+
+        Args:
+            query: SQL query to execute
+            *args: Query parameters
+            fetch_type: Type of fetch operation (all, row, val, none)
+
+        Returns:
+            Query results based on fetch_type
+        """
         async with self.pool.acquire() as conn:
             try:
-                # Ensure read-only for safety in tools/resources
-                # await conn.execute("SET TRANSACTION READ ONLY") # Be cautious if tools need write
+                # Allow setting statement_timeout for individual queries
+                # await conn.execute("SET statement_timeout = '30s'")
 
                 if fetch_type == "all":
                     return await conn.fetch(query, *args)
@@ -113,7 +143,7 @@ class Database:
                 raise  # Re-raise to be handled by the caller
 
 
-# --- Lifespan Management ---
+# --- Lifespan Context Type ---
 @dataclass
 class AppContext:
     """Context passed to resource/tool handlers via lifespan."""
@@ -124,9 +154,13 @@ class AppContext:
     resource_base_url_parts: Optional[ParseResult] = None
 
 
+# --- Lifespan Management ---
 @asynccontextmanager
 async def app_lifespan(app: FastMCP):
-    """MCP Server lifespan context manager."""
+    """MCP Server lifespan context manager.
+
+    Manages database connection lifecycle and resource registration.
+    """
     logger.info("Lifespan startup: Initializing PostgreSQL MCP Server...")
     db_pool = None
     settings = None
@@ -142,7 +176,6 @@ async def app_lifespan(app: FastMCP):
         logger.info("PostgresSettings loaded.")
 
         # 2. Fetch Database URL from ConfigManager (only during startup)
-        # It's okay if this fails initially, we might retry or use defaults
         try:
             db_url, _ = get_api_parameters(DATABASE_CONNECTOR_ID)
             settings.sdk_db_url = db_url  # Store the fetched URL
@@ -164,6 +197,7 @@ async def app_lifespan(app: FastMCP):
             connection_string = settings.get_connection_string()
             safe_connection_string = settings._get_safe_connection_string(connection_string)
             logger.info(f"Attempting to connect to database: {safe_connection_string}")
+
             db_pool = await asyncpg.create_pool(
                 dsn=connection_string,
                 min_size=settings.min_connections,
@@ -187,7 +221,8 @@ async def app_lifespan(app: FastMCP):
             # Parse connection string for building resource URIs
             resource_base_url_parts = urlparse(connection_string)
             logger.info(
-                f"Successfully connected to database: {safe_connection_string} (Database: {database_name})"
+                f"Successfully connected to database: {safe_connection_string} "
+                f"(Database: {database_name})"
             )
 
         await connect_with_retry()  # Initial connection attempt with backoff
@@ -204,7 +239,7 @@ async def app_lifespan(app: FastMCP):
             await register_db_resources(app, app_context)
             yield app_context
         else:
-            # This should ideally not happen if backoff succeeds, but handle defensively
+            # This should ideally not happen if backoff succeeds
             logger.error("Failed to establish database connection during startup after retries.")
             raise RuntimeError("Database connection failed during startup.")
 
@@ -224,31 +259,8 @@ async def app_lifespan(app: FastMCP):
 mcp = FastMCP("postgres-mcp", lifespan=app_lifespan)
 
 
-# --- Helper to build Resource URIs ---
-def _build_resource_uri(
-    table_name: str, schema_name: str, ctx: Context[ServerSession, AppContext]
-) -> str:
-    """Builds a resource URI for a table schema using context."""
-    if (
-        not ctx.request_context.lifespan_context
-        or not ctx.request_context.lifespan_context.resource_base_url_parts
-    ):
-        logger.warning("Cannot build resource URI: Lifespan context or base URL parts missing.")
-        # Fallback or raise error - returning a placeholder for now
-        return f"postgres://{schema_name}/{table_name}/schema"
-
-    base_parts = ctx.request_context.lifespan_context.resource_base_url_parts
-    resource_path = f"/{schema_name}/{table_name}/schema"
-
-    uri_parts = base_parts._replace(path=resource_path, query="", fragment="")
-    if uri_parts.scheme == "postgresql":
-        uri_parts = uri_parts._replace(scheme="postgres")
-
-    return urlunparse(uri_parts)
-
-
 # --- Register DB resources during startup ---
-async def register_db_resources(app: FastMCP, context: AppContext):
+async def register_db_resources(app: FastMCP, context: AppContext) -> None:
     """Register database tables as resources during server startup."""
     logger.info("Registering database tables as resources...")
     try:
@@ -257,19 +269,6 @@ async def register_db_resources(app: FastMCP, context: AppContext):
             logger.warning("Cannot register resources: base URL parts missing.")
             return
 
-        # Use more compatible queries that don't rely on schema_catalog column
-        schemas_query = """
-            SELECT nspname AS schema_name 
-            FROM pg_catalog.pg_namespace
-            WHERE nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-              AND nspname NOT LIKE 'pg_temp_%'
-              AND nspname NOT LIKE 'pg_toast_%'
-        """
-        schemas = await db.execute_query(schemas_query)
-
-        # This is just to track what we've registered, for debugging
-        logger.info(f"Found {len(schemas)} schemas to register")
-
         # Register the resource template for all tables
         @mcp.resource(
             "postgres://{schema_name}/{table_name}/schema",
@@ -277,7 +276,6 @@ async def register_db_resources(app: FastMCP, context: AppContext):
         )
         async def get_table_schema(schema_name: str, table_name: str) -> str:
             """Reads the schema information for a specific table."""
-            # Get context using the get_context method
             ctx = mcp.get_context()
 
             logger.debug(f"Reading resource: postgres://{schema_name}/{table_name}/schema")
@@ -316,7 +314,10 @@ async def register_db_resources(app: FastMCP, context: AppContext):
                     raise McpError(
                         types.ErrorData(
                             code=-32002,
-                            message=f"Resource not found: Table '{schema_name}.{table_name}' does not exist.",
+                            message=(
+                                f"Resource not found: Table '{schema_name}.{table_name}' "
+                                "does not exist."
+                            ),
                         )
                     )
 
@@ -349,7 +350,10 @@ async def register_db_resources(app: FastMCP, context: AppContext):
                     # Table exists but no columns found (or permissions issue)
                     return json.dumps(
                         {
-                            "message": f"Table '{schema_name}.{table_name}' exists but no column info (check permissions?)."
+                            "message": (
+                                f"Table '{schema_name}.{table_name}' exists but no column "
+                                "info (check permissions?)."
+                            )
                         }
                     )
                 else:
@@ -368,7 +372,7 @@ async def register_db_resources(app: FastMCP, context: AppContext):
                 )
                 raise McpError(types.ErrorData(code=-32000, message="Internal server error"))
 
-        logger.info(f"Successfully registered database schema resource template.")
+        logger.info("Successfully registered database schema resource template.")
 
     except asyncpg.PostgresError as pg_err:
         logger.error(f"Postgres error registering resources: {pg_err}")
@@ -380,32 +384,38 @@ async def register_db_resources(app: FastMCP, context: AppContext):
 @mcp.tool(
     description="Run a read-only SQL query against the database.",
 )
-async def query(sql: str) -> str:
-    """Executes a read-only SQL query."""
-    # Get context using the method instead of parameter
+async def query(
+    sql: str = Field(description="SQL query to execute (SELECT, EXPLAIN, SHOW, WITH only)"),
+) -> str:
+    """
+    Executes a read-only SQL query against the PostgreSQL database.
+
+    Only SELECT, EXPLAIN, SHOW, and WITH queries are allowed for security.
+    Results are returned as JSON.
+    """
     ctx = mcp.get_context()
-
     logger.debug(f"Executing tool 'query' with SQL: {sql[:100]}...")
-    db = ctx.request_context.lifespan_context.db
-    settings = ctx.request_context.lifespan_context.settings
 
-    # --- Security Checks (similar to previous implementation) ---
+    # Get database from context
+    db = cast(Database, ctx.request_context.lifespan_context.db)
+    settings = cast(PostgresSettings, ctx.request_context.lifespan_context.settings)
+
+    # --- Security Checks ---
     sql_query = sql.strip()
     sql_upper = sql_query.upper()
-    allowed_starts = ("SELECT", "EXPLAIN", "SHOW", "WITH")  # Added WITH
+    allowed_starts = ("SELECT", "EXPLAIN", "SHOW", "WITH")
 
     if not sql_upper.startswith(allowed_starts):
-        # Allow CTEs starting with WITH
-        if not sql_upper.startswith("WITH"):
-            raise McpError(
-                types.ErrorData(
-                    code=-32602,
-                    message="Query error: Only SELECT, EXPLAIN, SHOW, WITH queries allowed.",
-                )
+        raise McpError(
+            types.ErrorData(
+                code=-32602,
+                message="Query error: Only SELECT, EXPLAIN, SHOW, WITH queries allowed.",
             )
+        )
 
     # More robust check for disallowed keywords (case-insensitive, whole word)
     disallowed_keywords_pattern = r"\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE|SET(?! statement_timeout)|COMMIT|ROLLBACK|SAVEPOINT|BEGIN|DECLARE|EXECUTE|COPY)\b"
+
     # Remove comments before checking
     sql_no_comments = re.sub(r"--.*$", "", sql_query, flags=re.MULTILINE)
     sql_no_comments = re.sub(r"/\*.*?\*/", "", sql_no_comments, flags=re.DOTALL)
@@ -416,7 +426,10 @@ async def query(sql: str) -> str:
         raise McpError(
             types.ErrorData(
                 code=-32602,
-                message=f"Query error: Query contains disallowed keywords: {', '.join(set(found_disallowed))}.",
+                message=(
+                    f"Query error: Query contains disallowed keywords: "
+                    f"{', '.join(set(found_disallowed))}."
+                ),
             )
         )
     # --- End Security Checks ---
@@ -444,7 +457,7 @@ async def query(sql: str) -> str:
                 {"message": "Query executed successfully", "result": str(results)}
             )
 
-        return result_json  # Return JSON string as per FastMCP tool signature
+        return result_json
 
     except asyncpg.PostgresError as pg_err:
         logger.error(f"SQL execution error: {pg_err}", exc_info=True)
@@ -458,7 +471,6 @@ async def query(sql: str) -> str:
         elif "timeout" in pg_err_msg:
             hint = f" Hint: Query exceeded the allowed time limit ({settings.command_timeout}s)."
 
-        # Raise McpError to signal tool execution failure correctly
         raise McpError(
             types.ErrorData(code=-32000, message=f"SQL Execution Error: {pg_err_msg}{hint}")
         )
@@ -469,19 +481,19 @@ async def query(sql: str) -> str:
 
 # --- Main execution block ---
 if __name__ == "__main__":
-    debug_mode = os.environ.get("DEBUG", "false").lower() in ("true", "1", "yes")
-    log_level = logging.DEBUG if debug_mode else logging.INFO
-
+    # Configure logging level
+    log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
     logging.basicConfig(level=log_level, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    logging.getLogger("postgres-mcp-server").setLevel(log_level)
 
-    logger.info(f"Starting PostgreSQL MCP Server via stdio (Debug Mode: {debug_mode})")
+    # Choose transport based on environment
+    transport = "stdio" if LOCAL_DEV else "sse"
+    logger.info(f"Starting PostgreSQL MCP Server via {transport} (Debug Mode: {DEBUG_MODE})")
+
     try:
-        # Use mcp.run() which handles the stdio transport and async loop
-        FastMCP.run(mcp, transport="stdio")
+        # Run the server with selected transport
+        mcp.run(transport=transport)
     except Exception as e:
         logger.critical(f"Server failed to start or exited unexpectedly: {e}", exc_info=True)
-        # Exit with error code if startup/run fails
         import sys
 
         sys.exit(1)
