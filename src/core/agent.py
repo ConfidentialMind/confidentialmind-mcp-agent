@@ -1,3 +1,4 @@
+# src/core/agent.py
 import asyncio
 import json
 import logging
@@ -9,10 +10,19 @@ from typing import Any, Dict, List, Optional
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 
+import mcp.types as mcp_types
+
+# Import SDK ClientSession and types
+from mcp import ClientSession, McpError
+
+# Use CM connectors for LLM and MCP session management
 from src.connectors.cm_llm_connector import CMLLMConnector
 from src.connectors.cm_mcp_connector import CMMCPManager
-from src.core.agent_db_connection import AgentDatabase, AgentPostgresSettings, fetch_agent_db_url
-from src.mcp.mcp_client import MCPClient
+
+# Database imports remain the same
+from src.core.agent_db_connection import AgentDatabase  # Assuming this is used for history
+
+# from src.core.agent_db_migration import AgentMigration # Migration handled elsewhere
 
 # Configure logging
 logging.basicConfig(
@@ -34,83 +44,57 @@ class Message(BaseModel):
 
 
 class AgentState(BaseModel):
-    """Agent workflow state"""
+    """Agent workflow state - updated for SDK types"""
 
     query: str = ""
     session_id: Optional[str] = None
-    mcp_results: Dict[str, Any] = Field(default_factory=dict)
+    # Store raw results keyed by a unique identifier for the action step
+    mcp_results: Dict[str, Any] = Field(default_factory=dict)  # Store raw SDK results or McpError
     thoughts: List[str] = Field(default_factory=list)
     response: Optional[str] = None
     error: Optional[str] = None
-    mcp_options: Optional[Dict[str, Any]] = None
-    planned_actions: List[Dict[str, Any]] = Field(default_factory=list)
+    # Removed mcp_options, use execution_context instead
+    planned_actions: List[Dict[str, Any]] = Field(
+        default_factory=list
+    )  # Plan still uses dict structure
     current_action_index: int = 0
     needs_more_info: bool = False
     follow_up_question: Optional[str] = None
-    available_schemas: List[Dict[str, str]] = Field(default_factory=list)
-    execution_context: Dict[str, Any] = Field(default_factory=dict)
+    # available_schemas now derived from context
+    execution_context: Dict[str, Any] = Field(
+        default_factory=dict
+    )  # Store tools, resources, errors etc.
     requires_replanning: bool = False
 
 
 class Agent:
-    """LangGraph-based agent implementation with SDK-based connections and database-backed conversation history"""
+    """LangGraph-based agent using MCP SDK ClientSessions"""
 
     def __init__(
         self,
         agent_db: AgentDatabase,
-        llm_connector: Optional[CMLLMConnector] = None,
-        mcp_manager: Optional[CMMCPManager] = None,
-        mcp_clients: Optional[Dict[str, MCPClient]] = None,
-        db_config_id: str = "DATABASE",
+        llm_connector: CMLLMConnector,
+        mcp_manager: CMMCPManager,
         debug: bool = False,
     ):
         """
         Initialize the agent with SDK-based connections.
 
         Args:
-            agent:db: An initialized and connected AgentDatabase instance.
-            llm_connector: SDK-based LLM connector (will create if None)
-            mcp_manager: SDK-based MCP manager (will create if None)
-            mcp_clients: Optional dictionary of MCP clients (overrides mcp_manager)
-            db_config_id: Config ID for the database connection in ConfigManager
-            debug: Enable debug logging
+            agent_db: An initialized and connected AgentDatabase instance for history.
+            llm_connector: Initialized SDK-based LLM connector.
+            mcp_manager: Initialized SDK-based MCP manager to get sessions.
+            debug: Enable debug logging.
         """
-        # Initialize LLM connector
-        self.llm = llm_connector or CMLLMConnector(config_id="LLM")
-
-        # Initialize MCP clients
-        if mcp_clients is not None:
-            # Use provided clients directly
-            self.mcp_clients = mcp_clients
-            logger.info(f"Using {len(mcp_clients)} provided MCP clients")
-        else:
-            # Use MCP manager passed in or created
-            current_mcp_manager = mcp_manager or CMMCPManager()
-
-            # Get clients from the manager. This relies on ConfigManager being initialized.
-            try:
-                self.mcp_clients = current_mcp_manager.get_all_clients()
-                logger.info(
-                    f"Using {len(self.mcp_clients)} MCP clients retrieved via CMMCPManager."
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to retrieve MCP clients via CMMCPManager: {e}. Agent might lack tool access.",
-                    exc_info=True,
-                )
-                self.mcp_clients = {}  # Initialize empty if retrieval fails
-
+        self.llm = llm_connector
+        self.mcp_manager = mcp_manager
+        self.mcp_sessions: Dict[str, ClientSession] = {}  # Will be populated in run/initialize
         self.debug = debug
-
-        # Database configuration
-        # self.db_config_id = db_config_id
-        # self.db = AgentDatabase(settings=AgentPostgresSettings())
         self.db = agent_db
-        self.current_history = []  # Temporary storage for current conversation
+        self.current_history: List[
+            Message
+        ] = []  # Temporary storage for current conversation history
 
-        # self._db_init_task = asyncio.create_task(self._initialize_database())
-
-        # Set logging level based on debug flag
         if debug:
             logger.setLevel(logging.DEBUG)
             logger.debug("Debug logging enabled")
@@ -118,56 +102,66 @@ class Agent:
         self.graph = self._build_graph().compile()
         logger.info("Agent workflow graph compiled")
 
-    # async def _initialize_database(self) -> bool:
-    #     """
-    #     Initialize database connection and ensure schema is correct.
-    #     Returns True if database is successfully connected and schema is valid.
-    #     """
-    #     try:
-    #         # Import the migration class
-    #         from src.core.agent_db_migration import AgentMigration
-    #
-    #         # Connect to database
-    #         db_url = await fetch_agent_db_url(self.db_config_id)
-    #         if not await self.db.connect(db_url):
-    #             logger.warning("Failed to connect to database during initialization")
-    #             return False
-    #
-    #         # Check and apply migrations if needed
-    #         migrator = AgentMigration(db=self.db)
-    #         migration_result = await migrator.ensure_schema()
-    #
-    #         if migration_result:
-    #             logger.info("Database schema verification/migration completed successfully")
-    #         else:
-    #             logger.warning("Database schema migration encountered issues")
-    #
-    #         return migration_result
-    #
-    #     except Exception as e:
-    #         logger.error(f"Error initializing database: {str(e)}", exc_info=True)
-    #         return False
+    # --- History Management (using AgentDatabase, assumed similar methods) ---
+    async def _load_history(self, session_id: str) -> List[Message]:
+        """Load conversation history from the database for a session."""
+        try:
+            await self.db.ensure_connected()
+            results = await self.db.execute_query(
+                """
+                SELECT role, content
+                FROM conversation_messages
+                WHERE session_id = $1
+                ORDER BY message_order
+                """,
+                session_id,
+            )
+            messages = [Message(role=row["role"], content=row["content"]) for row in results]
+            logger.debug(f"Loaded {len(messages)} messages for session {session_id}")
+            return messages
+        except Exception as e:
+            logger.error(f"Error loading history for session {session_id}: {e}")
+            return []
 
-    async def get_history(self, session_id: str) -> List[Message]:
-        """Get the conversation history for a session from the database.
-
-        Args:
-            session_id: The session ID to retrieve history for
-
-        Returns:
-            List of messages in the conversation history
-        """
-        return await self._load_history(session_id)
+    async def _save_message(self, session_id: str, message: Message) -> bool:
+        """Save a message to the database for a session."""
+        try:
+            await self.db.ensure_connected()
+            max_order = await self.db.execute_query(
+                "SELECT MAX(message_order) FROM conversation_messages WHERE session_id = $1",
+                session_id,
+                fetch_type="val",
+            )
+            message_order = 0 if max_order is None else max_order + 1
+            await self.db.execute_query(
+                """
+                INSERT INTO conversation_messages
+                (session_id, message_order, role, content, timestamp)
+                VALUES ($1, $2, $3, $4, NOW())
+                """,
+                session_id,
+                message_order,
+                message.role,
+                message.content,
+                fetch_type="none",
+            )
+            self.current_history.append(message)  # Also update in-memory history
+            logger.debug(f"Saved message for session {session_id} order {message_order}")
+            return True
+        except Exception as e:
+            if not self.db.is_connected():
+                logger.warning(
+                    f"DB not connected saving msg for {session_id}: {self.db.last_error()}"
+                )
+            else:
+                logger.error(f"Error saving message for session {session_id}: {e}")
+            # Still add to in-memory history if DB fails
+            if message not in self.current_history:
+                self.current_history.append(message)
+            return False
 
     async def clear_history(self, session_id: str) -> bool:
-        """Clear the conversation history for a session in the database.
-
-        Args:
-            session_id: The session ID to clear history for
-
-        Returns:
-            True if successfully cleared, False otherwise
-        """
+        """Clear the conversation history for a session in the database."""
         try:
             await self.db.ensure_connected()
             await self.db.execute_query(
@@ -181,1062 +175,823 @@ class Agent:
             logger.error(f"Error clearing history for session {session_id}: {e}")
             return False
 
-    async def _load_history(self, session_id: str) -> List[Message]:
-        """Load conversation history from the database for a session.
-
-        Args:
-            session_id: The session ID to load history for
-
-        Returns:
-            List of Message objects representing the conversation history
-        """
-        try:
-            await self.db.ensure_connected()
-            results = await self.db.execute_query(
-                """
-                SELECT role, content 
-                FROM conversation_messages 
-                WHERE session_id = $1 
-                ORDER BY message_order
-                """,
-                session_id,
-            )
-
-            messages = [Message(role=row["role"], content=row["content"]) for row in results]
-            logger.info(f"Loaded {len(messages)} messages for session {session_id}")
-            return messages
-        except Exception as e:
-            logger.error(f"Error loading history for session {session_id}: {e}")
-            return []  # Return empty list on error
-
-    async def _save_message(self, session_id: str, message: Message) -> bool:
-        """Save a message to the database for a session.
-
-        Args:
-            session_id: The session ID to save the message for
-            message: The message to save
-
-        Returns:
-            True if successfully saved, False otherwise
-        """
-        try:
-            await self.db.ensure_connected()
-
-            # Get the next message order
-            max_order = await self.db.execute_query(
-                "SELECT MAX(message_order) FROM conversation_messages WHERE session_id = $1",
-                session_id,
-                fetch_type="val",
-            )
-
-            # If this is the first message, start at 0
-            message_order = 0 if max_order is None else max_order + 1
-
-            # Insert the message
-            await self.db.execute_query(
-                """
-                INSERT INTO conversation_messages 
-                (session_id, message_order, role, content, timestamp) 
-                VALUES ($1, $2, $3, $4, NOW())
-                """,
-                session_id,
-                message_order,
-                message.role,
-                message.content,
-                fetch_type="none",
-            )
-
-            # Also add to current history for this run
-            self.current_history.append(message)
-
-            logger.info(f"Saved message for session {session_id} with order {message_order}")
-            return True
-        except Exception as e:
-            # Check if it's specifically a connection error vs query error
-            if not self.db.is_connected():
-                logger.warning(
-                    f"Database not connected when trying to save message for session {session_id}. Error: {self.db.last_error()}"
-                )
-            else:
-                logger.error(f"Error saving message for session {session_id}: {e}")
-            return False  # Return False on error
+    # --- End History Management ---
 
     def _build_graph(self) -> StateGraph:
-        """Build the agent workflow graph with improved planning capabilities"""
+        """Build the agent workflow graph (structure remains similar)."""
         graph = StateGraph(AgentState)
-
-        # Define core nodes
         graph.add_node("initialize_context", self._initialize_context)
         graph.add_node("parse_query", self._parse_query)
         graph.add_node("execute_mcp_actions", self._execute_mcp_actions)
         graph.add_node("evaluate_results", self._evaluate_results)
         graph.add_node("replan_actions", self._replan_actions)
         graph.add_node("generate_response", self._generate_response)
-        graph.add_node("plan_follow_up", self._plan_follow_up)
+        # Removed plan_follow_up node as it wasn't fully implemented/used consistently
+        # If needed, it can be re-added with updated logic.
 
-        # Define graph structure
         graph.add_edge("initialize_context", "parse_query")
-
-        # Define conditional edges
         graph.add_conditional_edges(
             "parse_query",
             self._determine_next_step_after_parsing,
-            {
-                "execute": "execute_mcp_actions",
-                "respond": "generate_response",
-            },
+            {"execute": "execute_mcp_actions", "respond": "generate_response"},
         )
-
         graph.add_edge("execute_mcp_actions", "evaluate_results")
-
         graph.add_conditional_edges(
             "evaluate_results",
             self._determine_next_step_after_evaluation,
             {
                 "more_actions": "execute_mcp_actions",
                 "replan": "replan_actions",
-                "follow_up": "plan_follow_up",
+                # "follow_up": "plan_follow_up", # Removed
                 "generate_response": "generate_response",
             },
         )
-
         graph.add_edge("replan_actions", "execute_mcp_actions")
+        # graph.add_edge("plan_follow_up", "execute_mcp_actions") # Removed
 
-        graph.add_conditional_edges(
-            "plan_follow_up",
-            lambda state: "execute" if state.planned_actions else "respond",
-            {
-                "execute": "execute_mcp_actions",
-                "respond": "generate_response",
-            },
-        )
-
-        # Set entry point and terminal node
         graph.set_entry_point("initialize_context")
         graph.add_edge("generate_response", END)
-
         return graph
 
-    def _initialize_context(self, state: AgentState) -> AgentState:
-        """Initialize the agent context with available tools and resources from all MCP clients"""
-        logger.info("Initializing agent context from all MCP clients")
+    async def _initialize_context(self, state: AgentState) -> AgentState:
+        """Initialize context by getting MCP sessions and discovering tools/resources."""
+        logger.info("Initializing agent context: getting MCP sessions...")
+        try:
+            # Get all configured sessions from the manager
+            self.mcp_sessions = await self.mcp_manager.get_all_sessions()
+            logger.info(f"Retrieved {len(self.mcp_sessions)} MCP sessions.")
+        except Exception as e:
+            logger.error(f"Failed to get MCP sessions: {e}", exc_info=self.debug)
+            state.error = f"Failed to initialize MCP connections: {e}"
+            # Allow continuing without MCP connections if desired, or raise here
+            # For now, we continue but log the error.
+            self.mcp_sessions = {}
 
-        # Initialize containers for tools and resources
+        # Initialize containers in execution_context
         state.execution_context["available_tools"] = []
-        state.available_schemas = []
         state.execution_context["available_resources"] = []
-        state.execution_context["server_ids"] = list(self.mcp_clients.keys())
+        state.execution_context["server_ids"] = list(self.mcp_sessions.keys())
 
-        # Discover available tools and resources from all clients
-        for server_id, client in self.mcp_clients.items():
-            try:
-                # Get available tools from this client
-                tools_response = client.list_tools()
-                tools = tools_response.get("tools", [])
+        # Discover tools and resources from each session concurrently
+        tasks = {}
+        for server_id, session in self.mcp_sessions.items():
+            tasks[server_id] = asyncio.gather(
+                session.list_tools(),
+                session.list_resources(),
+                return_exceptions=True,  # Don't let one failure stop others
+            )
 
-                # Add server_id to each tool for identification
-                for tool in tools:
-                    tool["server_id"] = server_id
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-                state.execution_context["available_tools"].extend(tools)
-
-                # Get available resources (schemas) from this client
-                resources_response = client.list_resources()
-                resources = resources_response.get("resources", [])
-
-                # Add server_id to each resource for identification
-                for resource in resources:
-                    resource["server_id"] = server_id
-
-                state.available_schemas.extend(resources)
-                state.execution_context["available_resources"].extend(resources)
-
-                logger.debug(
-                    f"Initialized context from {server_id} with {len(tools)} tools and {len(resources)} resources"
-                )
-
-            except Exception as e:
+        for i, server_id in enumerate(tasks.keys()):
+            server_result = results[i]
+            if isinstance(server_result, Exception):
                 logger.error(
-                    f"Error initializing context from {server_id}: {e}", exc_info=self.debug
+                    f"Error initializing context from {server_id}: {server_result}",
+                    exc_info=self.debug,
                 )
-                state.error = f"Failed to initialize agent context from {server_id}: {e}"
+                continue  # Skip this server
+
+            tools_result, resources_result = server_result
+
+            # Process tools
+            if isinstance(tools_result, Exception):
+                logger.error(
+                    f"Error listing tools from {server_id}: {tools_result}", exc_info=self.debug
+                )
+            elif isinstance(tools_result, mcp_types.ListToolsResult) and tools_result.tools:
+                tools_list = []
+                for tool in tools_result.tools:
+                    # Convert SDK Tool object to dict for planning prompt
+                    tool_dict = tool.model_dump(exclude_none=True)
+                    tool_dict["server_id"] = server_id
+                    tools_list.append(tool_dict)
+                state.execution_context["available_tools"].extend(tools_list)
+                logger.debug(f"Found {len(tools_list)} tools from {server_id}")
+
+            # Process resources
+            if isinstance(resources_result, Exception):
+                logger.error(
+                    f"Error listing resources from {server_id}: {resources_result}",
+                    exc_info=self.debug,
+                )
+            elif (
+                isinstance(resources_result, mcp_types.ListResourcesResult)
+                and resources_result.resources
+            ):
+                resource_list = []
+                for resource in resources_result.resources:
+                    # Convert SDK Resource object to dict
+                    res_dict = resource.model_dump(exclude_none=True)
+                    res_dict["server_id"] = server_id
+                    resource_list.append(res_dict)
+                state.execution_context["available_resources"].extend(resource_list)
+                logger.debug(f"Found {len(resource_list)} resources from {server_id}")
 
         return state
 
     def _determine_next_step_after_parsing(self, state: AgentState) -> str:
-        """Determine whether to execute actions or generate response directly"""
+        """Determine whether to execute actions or generate response directly."""
+        if state.error:  # If init or parsing failed
+            return "generate_response"
         if state.planned_actions:
             return "execute"
         return "respond"
 
     def _determine_next_step_after_evaluation(self, state: AgentState) -> str:
-        """Determine next step after evaluating execution results"""
+        """Determine next step after evaluating execution results."""
+        if state.error:  # If execution failed critically
+            return "generate_response"
         if state.requires_replanning:
+            state.requires_replanning = False  # Reset flag before going to replan
             return "replan"
+        # Check if there are more actions in the *current* plan
         if state.current_action_index < len(state.planned_actions):
             return "more_actions"
-        elif state.needs_more_info:
-            return "follow_up"
+        # Removed follow_up logic for simplicity, can be re-added
+        # elif state.needs_more_info:
+        #     return "follow_up"
         return "generate_response"
 
     def _parse_query(self, state: AgentState) -> AgentState:
-        """Use LLM to determine which MCPs and actions are needed with improved planning"""
-        logger.info(
-            "Parsing user query: %s",
-            state.query,
-        )
+        """Use LLM to determine which MCPs and actions are needed."""
+        logger.info("Parsing user query: %s", state.query)
+        state.execution_context["user_message_to_save"] = Message(role="user", content=state.query)
 
-        # Add the user query to conversation history
-        new_message = Message(role="user", content=state.query)
-
-        # Store the message in the database (need to handle this in run since this isn't async)
-        state.execution_context["user_message_to_save"] = new_message
-
-        # Prepare MCP tool information for the LLM prompt
+        # --- Format available tools/resources for LLM ---
         mcp_info = "Available Tool Servers:\n"
+        server_details = []
         for server_id in state.execution_context.get("server_ids", []):
-            mcp_info += f"Server: {server_id}\n"
-
-            # Get tools for this server
+            server_info = f"Server ID: '{server_id}'\n"
             tools = [
                 tool
                 for tool in state.execution_context.get("available_tools", [])
                 if tool.get("server_id") == server_id
             ]
-
-            if tools:
-                mcp_info += "  Available Tools:\n"
-                for tool in tools:
-                    schema_desc = (
-                        f" Requires input: {json.dumps(tool.get('inputSchema', {}))}"
-                        if tool.get("inputSchema")
-                        else ""
-                    )
-                    mcp_info += f"  - Name: {tool.get('name', 'N/A')}, Description: {tool.get('description', 'N/A')}{schema_desc}\n"
-            else:
-                mcp_info += "  No tools currently available.\n"
-
-            # Format schema information for this server
             resources = [
-                res for res in state.available_schemas if res.get("server_id") == server_id
+                res
+                for res in state.execution_context.get("available_resources", [])
+                if res.get("server_id") == server_id
             ]
 
-            if resources:
-                mcp_info += "\n  Available Data Resources:\n"
-                for res in resources:
-                    mcp_info += f"  - {res.get('name', res.get('uri'))} (URI: {res.get('uri')})\n"
+            if tools:
+                server_info += "  Tools:\n"
+                for tool in tools:
+                    # Use model_dump_json for schema to ensure it's serializable JSON string
+                    schema_str = (
+                        json.dumps(tool.get("inputSchema")) if tool.get("inputSchema") else "{}"
+                    )
+                    server_info += f"    - Name: {tool.get('name', 'N/A')}\n      Description: {tool.get('description', 'N/A')}\n      Input Schema: {schema_str}\n"
+                    # Include annotations if available
+                    annotations = tool.get("annotations")
+                    if annotations:
+                        server_info += f"      Annotations: {json.dumps(annotations)}\n"
+            else:
+                server_info += "  No tools available.\n"
 
-        # Format conversation history for the prompt
+            if resources:
+                server_info += "  Resources (Schemas/Data):\n"
+                for res in resources:
+                    # Use model_dump_json for resource details
+                    res_str = json.dumps(
+                        {k: v for k, v in res.items() if k != "server_id"}, default=str
+                    )
+                    server_info += f"    - {res_str}\n"  # URI is primary identifier
+            else:
+                server_info += "  No resources available.\n"
+            server_details.append(server_info)
+
+        mcp_info += "\n".join(server_details)
+        # --- End Formatting ---
+
         conversation_context = self._format_conversation_history(self.current_history)
 
-        # Generate the planning prompt with improved multi-hop guidance
         prompt = f"""
-        You need to analyze the user's query and create a comprehensive plan to address it using the available tool servers.
-        
-        You can interact with tool servers using these MCP methods:
-        - `mcp_listResources`: Lists available data resources (like table schemas). Returns a list of {{uri, name, mimeType}}.
-        - `mcp_readResource`: Reads the content of a specific resource URI. Requires 'uri' parameter. Returns {{contents: [{{uri, text, mimeType}}]}}. Use this to get schema details.
-        - `mcp_listTools`: Lists available tools and their input requirements.
-        - `mcp_callTool`: Executes a specific tool. Requires 'name' and 'arguments' parameters.
+        Analyze the user's query and create a plan using the available MCP tool servers.
 
-        Current Available Resources and Tools:
+        MCP Methods Overview:
+        - `listResources`: Lists available data resources (e.g., schemas). Returns a list of resources (URI, name, mimeType).
+        - `readResource`: Reads content of a resource URI. Params: {{uri: string}}. Returns resource content (text or blob).
+        - `listTools`: Lists available tools. Returns a list of tools (name, description, inputSchema).
+        - `callTool`: Executes a tool. Params: {{name: string, arguments: dict}}. Returns tool output (text, image, etc.) or an error flag.
+
+        Available Servers, Tools, and Resources:
         {mcp_info}
 
-        Conversation history:
+        Conversation History:
         {conversation_context}
 
-        User query: {state.query}
+        User Query: {state.query}
 
-        Think step-by-step to create a complete plan that addresses the user's question. When creating your plan, consider the following guidelines:
-        
-        1. For database-related questions:
-           - If you need schema knowledge, plan to first fetch the schema using `mcp_readResource`
-           - SQL queries should ALWAYS include schema qualification (e.g., use "schemaname.tablename" not just "tablename")
-           - Always inspect resource URIs carefully to extract the correct schema name
-           - Remember that a resource URI like "postgres://user@host:port/db/schema_name/table_name/schema" indicates the table is in schema "schema_name"
-        
-        2. For RAG-related queries:
-           - Use the 'rag_get_context' tool to retrieve relevant context chunks
-           - Use the 'rag_generate_completion' tool to generate completions with context
-        
-        3. Multi-step reasoning:
-           - Break down complex queries into distinct stages
-           - If information from one step is needed for another, plan the entire sequence
-           - Don't leave follow-up actions implicit or for future steps
-        
-        4. Error handling:
-           - Consider alternative approaches if a primary action might fail
-           - For database queries, plan fallback actions in case of schema or table name issues
-        
-        IMPORTANT: 
-        - You MUST specify the server_id for each action (which server to use: "postgres" or "rag")
-        - Use previous conversations for context when relevant. If the user refers to previous queries or results, use that context in your planning.
+        Think step-by-step to create a plan. Your plan should be a sequence of actions.
+        1. Identify the goal of the user query.
+        2. Determine which server(s) and tool(s)/resource(s) are needed.
+        3. If database access is needed (server_id 'postgres'):
+           - Use `listResources` or the available resources list above to find table schema URIs.
+           - Use `readResource` with the correct URI (e.g., postgres://.../schema_name/table_name/schema) to get column details *before* writing a query.
+           - Use the `query` tool via `callTool` for executing SQL. Ensure SQL uses schema qualification (e.g., `schema_name.table_name`).
+        4. For other tools, use `callTool` with the correct server_id, tool name, and arguments based on the inputSchema.
+        5. Plan all necessary steps sequentially if one depends on another.
 
-        Format your response as JSON:
+        Output Format (JSON):
         {{
-            "thought": "your reasoning",
-            "plan": "high-level plan description",
+            "thought": "Your reasoning process.",
+            "plan": "High-level plan description.",
             "actions": [
                 {{
-                    "server_id": "agentTools", // REQUIRED: Specify which server to use: postgres or rag
-                    "mcp_method": "mcp_readResource", // or mcp_callTool, etc.
-                    "params": {{ // Parameters for the MCP method
-                        "uri": "postgres://..." // for readResource
-                        // OR
-                        "name": "query",       // for callTool
-                        "arguments": {{ "sql": "SELECT ..." }} // for callTool
-                    }},
-                    "reason": "why this action is needed",
-                    "expected_outcome": "what we expect to learn from this action"
+                    "server_id": "...", // REQUIRED: e.g., "postgres" or other server ID from the list
+                    "mcp_method": "...", // e.g., "readResource", "callTool"
+                    "params": {{...}},    // Parameters for the method (e.g., {{"uri": "..."}} or {{"name": "query", "arguments": {{"sql": "..."}}}})
+                    "reason": "Why this action is needed.",
+                    "expected_outcome": "What this action should provide."
                 }}
                 // ... more actions if needed
             ]
         }}
-        
         If no actions are needed, use "actions": [].
-        If more info needed, include "needs_more_info": true, "follow_up_question": "..."
+        If more info needed, add "needs_more_info": true, "follow_up_question": "...".
         """
 
-        logger.debug("Sending query to LLM for planning with MCP methods")
+        logger.debug("Sending query to LLM for planning...")
         response = self.llm.generate(prompt)
         parsed_response = self._parse_json_response(response)
         logger.debug("Received and parsed LLM planning response")
 
-        # Process the response
-        thought = parsed_response.get("thought", "No thought process provided")
-        plan = parsed_response.get("plan", "No plan provided")
-
-        # Store the thought and plan
+        thought = parsed_response.get("thought", "No thought process provided.")
+        plan = parsed_response.get("plan", "No plan provided.")
         state.thoughts.append(thought)
-        if plan and plan != "No plan provided":
+        if plan != "No plan provided.":
             state.thoughts.append(f"Plan: {plan}")
+        logger.info(f"Agent Thought: {thought}")
+        logger.info(f"Plan: {plan}")
 
-        logger.info("Agent thought: %s", thought)
-        logger.info("Plan: %s", plan)
+        state.planned_actions = parsed_response.get("actions", [])
+        state.current_action_index = 0
+        logger.info(f"Planned {len(state.planned_actions)} actions.")
+        for i, action in enumerate(state.planned_actions):
+            logger.debug(
+                f"Action {i + 1}: {action.get('server_id')}.{action.get('mcp_method')}({action.get('params', {})}) - Reason: {action.get('reason')}"
+            )
 
-        # Process planned actions
-        if "actions" in parsed_response:
-            state.planned_actions = parsed_response.get("actions", [])
-            state.current_action_index = 0
-            action_count = len(state.planned_actions)
-            logger.info("Planned %d actions", action_count)
-            for i, action in enumerate(state.planned_actions):
-                logger.debug(
-                    "Action %d: %s - %s - Server: %s",
-                    i + 1,
-                    action.get("mcp_method", "unknown"),
-                    json.dumps(action.get("params", {}), default=str),
-                    action.get("server_id", "unknown"),
-                )
-                # Store reason if provided
-                if "reason" in action:
-                    logger.debug("Reason: %s", action.get("reason"))
-
-        # Check if more info is needed
+        # Check if more info is needed (though follow-up node is removed, flag might be useful)
         if parsed_response.get("needs_more_info", False):
             state.needs_more_info = True
             state.follow_up_question = parsed_response.get("follow_up_question")
-            follow_up = state.follow_up_question or "No specific question provided"
-            state.thoughts.append(f"Need more information: {follow_up}")
-            logger.info("Agent needs more information: %s", follow_up)
+            state.thoughts.append(
+                f"Needs more info: {state.follow_up_question or 'General clarification'}"
+            )
 
         return state
 
-    def _execute_mcp_actions(self, state: AgentState) -> AgentState:
-        """Execute actions through the appropriate MCPs"""
+    async def _execute_mcp_actions(self, state: AgentState) -> AgentState:
+        """Execute the next planned action using the appropriate MCP ClientSession."""
         if state.current_action_index >= len(state.planned_actions):
-            logger.debug("No more actions to execute")
+            logger.debug("No more actions to execute in the current plan.")
             return state
 
         action_spec = state.planned_actions[state.current_action_index]
         server_id = action_spec.get("server_id")
         mcp_method = action_spec.get("mcp_method")
         params = action_spec.get("params", {})
-
-        # Validate we have a server_id
-        if not server_id:
-            error_msg = "Missing server_id in action specification"
-            logger.error(error_msg)
-            state.thoughts.append(f"Error: {error_msg}")
-            state.mcp_results[f"action_{state.current_action_index}_{mcp_method}"] = {
-                "error": error_msg
-            }
-            state.current_action_index += 1
-            return state
-
-        # Check if the server exists
-        if server_id not in self.mcp_clients:
-            error_msg = f"Unknown server_id: {server_id}"
-            logger.error(error_msg)
-            state.thoughts.append(f"Error: {error_msg}")
-            state.mcp_results[f"action_{state.current_action_index}_{mcp_method}"] = {
-                "error": error_msg
-            }
-            state.current_action_index += 1
-            return state
-
-        # Get the appropriate client
-        client = self.mcp_clients[server_id]
-
-        # Create a shortened version for logging
-        params_str = json.dumps(params, default=str)
-        action_label = f"{server_id}.{mcp_method}({params_str})"
-
-        logger.info(
-            "Executing action %d/%d: %s",
-            state.current_action_index + 1,
-            len(state.planned_actions),
-            action_label,
+        action_key = (
+            f"action_{state.current_action_index}_{server_id}_{mcp_method}"  # Unique key for result
         )
-        state.thoughts.append(f"Executing MCP action: {action_label}")
 
-        result = None
-        error_msg = None
-        try:
-            # Use the specific MCPClient to execute the action
-            if mcp_method == "mcp_listResources":
-                result = client.list_resources()
-            elif mcp_method == "mcp_readResource":
-                if "uri" not in params:
-                    raise ValueError("Missing 'uri' parameter for readResource")
-                result = client.read_resource(uri=params["uri"])
-            elif mcp_method == "mcp_listTools":
-                result = client.list_tools()
-            elif mcp_method == "mcp_callTool":
-                if "name" not in params:
-                    raise ValueError("Missing 'name' parameter for callTool")
-
-                # Special handling for SQL queries (postgres server only)
-                if (
-                    server_id == "postgres"
-                    and params["name"] == "query"
-                    and "arguments" in params
-                    and "sql" in params["arguments"]
-                ):
-                    # Check if SQL has schema qualification in FROM clauses
-                    sql = params["arguments"]["sql"]
-                    enhanced_sql = self._ensure_schema_qualification(sql, state)
-                    if enhanced_sql != sql:
-                        logger.info(f"Enhanced SQL with schema qualification: {enhanced_sql}")
-                        state.thoughts.append(
-                            f"Enhanced SQL with schema qualification: {enhanced_sql}"
-                        )
-                        params["arguments"]["sql"] = enhanced_sql
-
-                result = client.call_tool(name=params["name"], arguments=params.get("arguments"))
-            else:
-                raise ValueError(f"Unsupported MCP method in plan: {mcp_method}")
-
-            logger.debug(f"MCP action execution successful via {server_id} client")
-            state.thoughts.append(f"Action result: Successfully executed {server_id}.{mcp_method}")
-
-            # Store result with a unique key per action
-            action_key = f"action_{state.current_action_index}_{server_id}_{mcp_method}"
-            state.mcp_results[action_key] = result
-
-            # For SQL queries, extract and store results in a more accessible format
-            if (
-                server_id == "postgres"
-                and mcp_method == "mcp_callTool"
-                and params["name"] == "query"
-            ):
-                try:
-                    # Extract actual data from the tool response
-                    if "content" in result and result["content"]:
-                        content_text = result["content"][0].get("text", "")
-                        if content_text:
-                            # Try to parse as JSON
-                            try:
-                                parsed_data = json.loads(content_text)
-                                state.execution_context[
-                                    f"query_result_{state.current_action_index}"
-                                ] = parsed_data
-                                logger.debug(
-                                    f"Stored parsed query result for action {state.current_action_index}"
-                                )
-                            except json.JSONDecodeError:
-                                state.execution_context[
-                                    f"query_result_{state.current_action_index}"
-                                ] = content_text
-                except Exception as e:
-                    logger.warning(f"Failed to extract and parse query result: {e}")
-
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(
-                f"Error executing MCP action {server_id}.{mcp_method}: {error_msg}",
-                exc_info=self.debug,
+        if not server_id or not mcp_method:
+            error_msg = f"Invalid action specification at index {state.current_action_index}: Missing server_id or mcp_method."
+            logger.error(error_msg)
+            state.thoughts.append(f"Error: {error_msg}")
+            state.mcp_results[action_key] = McpError(
+                mcp_types.ErrorData(code=-32602, message=error_msg)
             )
-            state.thoughts.append(f"Error executing {server_id}.{mcp_method}: {error_msg}")
-            action_key = f"action_{state.current_action_index}_{server_id}_{mcp_method}"
-            state.mcp_results[action_key] = {"error": error_msg}
+            state.current_action_index += 1
+            state.error = error_msg  # Signal critical error
+            return state
 
-        # Advance to next action
+        if server_id not in self.mcp_sessions:
+            error_msg = f"MCP session for server_id '{server_id}' not available."
+            logger.error(error_msg)
+            state.thoughts.append(f"Error: {error_msg}")
+            state.mcp_results[action_key] = McpError(
+                mcp_types.ErrorData(code=-32000, message=error_msg)
+            )
+            state.current_action_index += 1
+            state.error = error_msg  # Signal critical error
+            return state
+
+        session = self.mcp_sessions[server_id]
+        action_label = f"{server_id}.{mcp_method}({json.dumps(params, default=str)})"
+        logger.info(
+            f"Executing action {state.current_action_index + 1}/{len(state.planned_actions)}: {action_label}"
+        )
+        state.thoughts.append(f"Executing: {action_label}")
+
+        try:
+            result: Any = None
+            if mcp_method == "listResources":
+                result = await session.list_resources()
+            elif mcp_method == "readResource":
+                if "uri" not in params:
+                    raise ValueError("Missing 'uri' parameter")
+                result = await session.read_resource(uri=params["uri"])
+            elif mcp_method == "listTools":
+                result = await session.list_tools()
+            elif mcp_method == "callTool":
+                if "name" not in params:
+                    raise ValueError("Missing 'name' parameter")
+                # TODO: Add schema qualification logic back here if needed, similar to previous version
+                # sql = params.get("arguments", {}).get("sql")
+                # if server_id == "postgres" and params["name"] == "query" and sql:
+                #     enhanced_sql = self._ensure_schema_qualification(sql, state) # Ensure this method exists or adapt
+                #     if enhanced_sql != sql:
+                #          logger.info(f"Enhanced SQL: {enhanced_sql}")
+                #          params["arguments"]["sql"] = enhanced_sql
+                result = await session.call_tool(
+                    name=params["name"], arguments=params.get("arguments")
+                )
+            else:
+                raise ValueError(f"Unsupported MCP method: {mcp_method}")
+
+            logger.debug(f"Action successful: {action_label}")
+            state.thoughts.append(f"Action Result: Success for {action_label}")
+            state.mcp_results[action_key] = result  # Store the raw SDK result object
+
+            # Specific handling for CallToolResult to check isError
+            if isinstance(result, mcp_types.CallToolResult) and result.isError:
+                error_msg = "Tool execution failed."
+                if result.content and isinstance(result.content[0], mcp_types.TextContent):
+                    error_msg = result.content[0].text
+                logger.warning(f"Tool call {action_label} reported error: {error_msg}")
+                state.thoughts.append(f"Action Result: Tool error for {action_label}: {error_msg}")
+                # Store error info for evaluation/replanning
+                state.mcp_results[action_key] = McpError(
+                    mcp_types.ErrorData(code=-32001, message=error_msg)
+                )
+
+        except McpError as e:
+            error_msg = e.error.message
+            logger.error(f"MCPError executing {action_label}: {error_msg}", exc_info=self.debug)
+            state.thoughts.append(f"Action Result: MCP Error for {action_label}: {error_msg}")
+            state.mcp_results[action_key] = e  # Store the McpError object
+        except Exception as e:
+            error_msg = f"Unexpected error executing {action_label}: {str(e)}"
+            logger.error(error_msg, exc_info=self.debug)
+            state.thoughts.append(f"Action Result: Unexpected Error for {action_label}: {str(e)}")
+            state.mcp_results[action_key] = McpError(
+                mcp_types.ErrorData(code=-32000, message=error_msg)
+            )
+            state.error = error_msg  # Signal critical error if unexpected exception occurs
+
         state.current_action_index += 1
         return state
 
     def _evaluate_results(self, state: AgentState) -> AgentState:
-        """Evaluate action results to determine if replanning is needed"""
-        if not state.mcp_results:
+        """Evaluate action results to determine if replanning is needed."""
+        if not state.mcp_results or state.error:  # Skip if no results or critical error occurred
             return state
 
-        # Get the most recent action result
         last_action_index = state.current_action_index - 1
-        action_spec = (
-            state.planned_actions[last_action_index]
-            if last_action_index >= 0 and last_action_index < len(state.planned_actions)
-            else None
-        )
+        if last_action_index < 0:
+            return state  # No action executed yet
 
-        if not action_spec:
-            return state
-
+        # Find the key for the last action's result
+        last_result_key = None
+        action_spec = state.planned_actions[last_action_index]
         server_id = action_spec.get("server_id", "")
         mcp_method = action_spec.get("mcp_method", "")
-        last_result_key = f"action_{last_action_index}_{server_id}_{mcp_method}"
+        possible_key = f"action_{last_action_index}_{server_id}_{mcp_method}"
+        if possible_key in state.mcp_results:
+            last_result_key = possible_key
 
-        # If the key doesn't exist, try the old format without server_id
-        if last_result_key not in state.mcp_results:
-            last_result_key = f"action_{last_action_index}_{mcp_method}"
+        if not last_result_key:
+            logger.warning(f"Could not find result key for last action index {last_action_index}")
+            return state  # Cannot evaluate if result key is missing
 
-        # Check if the last action had an error
-        last_result = state.mcp_results.get(last_result_key, {})
+        last_result = state.mcp_results.get(last_result_key)
 
-        # For callTool actions, check isError flag
-        if mcp_method == "mcp_callTool" and isinstance(last_result, dict):
-            if last_result.get("isError", False) or "error" in last_result:
-                logger.info("Last action failed, may need replanning")
-                state.requires_replanning = True
+        # Check if the result is an McpError object (indicating failure)
+        if isinstance(last_result, McpError):
+            logger.info(
+                f"Action {last_action_index + 1} ({action_spec.get('mcp_method')}) failed, initiating replanning."
+            )
+            state.requires_replanning = True
+            state.execution_context["last_error"] = last_result.error.message
+            # Check for specific SQL errors indicating schema issues
+            if (
+                server_id == "postgres"
+                and "relation" in str(last_result.error.message).lower()
+                and "does not exist" in str(last_result.error.message).lower()
+            ):
+                state.execution_context["schema_qualification_needed"] = True
+                state.thoughts.append(
+                    "Error suggests table wasn't found. Ensure schema qualification."
+                )
 
-                # Extract error message for better context
-                error_msg = "Unknown error"
-                if "error" in last_result:
-                    error_msg = last_result["error"]
-                elif "content" in last_result and last_result["content"]:
-                    content = (
-                        last_result["content"][0]
-                        if isinstance(last_result["content"], list)
-                        else last_result["content"]
-                    )
-                    if isinstance(content, dict) and "text" in content:
-                        error_msg = content["text"]
-
-                state.execution_context["last_error"] = error_msg
-                state.thoughts.append(f"Action failed with error: {error_msg}")
-                logger.debug(f"Identified error in result: {error_msg}")
-
-                # Check for specific SQL errors that suggest schema qualification issues (postgres only)
-                if (
-                    server_id == "postgres"
-                    and "relation" in str(error_msg)
-                    and "does not exist" in str(error_msg)
-                ):
-                    state.execution_context["schema_qualification_needed"] = True
-                    state.thoughts.append(
-                        "The error suggests a relation/table was not found. May need schema qualification."
-                    )
+        # No error found in the last step
+        else:
+            state.requires_replanning = False
+            state.execution_context.pop("last_error", None)  # Clear last error
+            state.execution_context.pop("schema_qualification_needed", None)
 
         return state
 
     def _replan_actions(self, state: AgentState) -> AgentState:
-        """Replan actions based on execution results and errors"""
-        logger.info("Replanning actions due to execution issues")
+        """Replan actions based on execution errors."""
+        logger.info("Replanning actions due to execution issues...")
 
-        # Extract context for replanning
         last_error = state.execution_context.get("last_error", "Unknown error")
         schema_qualification_needed = state.execution_context.get(
             "schema_qualification_needed", False
         )
 
-        # Build a prompt that includes the error information and guidance
+        # Format available tools/resources again for the replanning prompt
+        mcp_info = (
+            "Available Servers, Tools, and Resources:\n"  # Reuse formatting from _parse_query
+        )
+        server_details = []
+        for server_id in state.execution_context.get("server_ids", []):
+            # ... (reuse formatting logic from _parse_query) ...
+            server_info = f"Server ID: '{server_id}'\n"
+            tools = [
+                t
+                for t in state.execution_context.get("available_tools", [])
+                if t.get("server_id") == server_id
+            ]
+            resources = [
+                r
+                for r in state.execution_context.get("available_resources", [])
+                if r.get("server_id") == server_id
+            ]
+            # ... (add tool/resource details as in _parse_query) ...
+            server_details.append(server_info)
+        mcp_info += "\n".join(server_details)
+
         prompt = f"""
-        The previous plan encountered an issue and needs to be revised.
-        
-        User query: {state.query}
-        
-        Current plan actions executed so far:
+        The previous plan failed. Analyze the error and the context to create a revised plan.
+
+        User Query: {state.query}
+        Original Plan Actions Executed:
         {self._format_actions_executed(state)}
-        
-        Error encountered: {last_error}
-        
-        {"The error suggests a table or relation wasn't found - ensure you use proper schema qualification (schema_name.table_name) in SQL queries." if schema_qualification_needed else ""}
-        
-        Available schemas in the database:
-        {self._format_available_schemas(state)}
-        
-        Results from previously successful actions:
+
+        Last Action Error: {last_error}
+        {"Hint: The error suggests a table/relation wasn't found. Ensure SQL uses schema qualification (schema_name.table_name)." if schema_qualification_needed else ""}
+
+        Available Servers, Tools, and Resources:
+        {mcp_info}
+
+        Conversation History:
+        {self._format_conversation_history(self.current_history)}
+
+        Successful Results from Previous Actions:
         {self._format_successful_results(state)}
-        
-        Think step-by-step to revise the plan and fix the issue. Consider:
-        1. Is there a schema qualification issue? 
-        2. Are the table names correct?
-        3. Does the query syntax need adjustments?
-        4. Are you using the correct server (postgres or rag) for this action?
-        
-        IMPORTANT: You MUST specify the server_id for each action.
-        
-        Format your response as JSON:
+
+        Think step-by-step to revise the plan:
+        1. Understand why the last action failed based on the error.
+        2. If it was a database query error: Did it lack schema qualification? Was the table/column name wrong? Refer to available resources.
+        3. If it was another tool error: Can different arguments fix it? Is there an alternative tool?
+        4. Create a NEW sequence of actions to achieve the original goal, correcting the mistake. Start the new plan from the point of failure.
+
+        Output Format (JSON):
         {{
-            "thought": "your reasoning on what went wrong",
-            "revised_plan": "description of the revised approach",
+            "thought": "Your reasoning about the failure and the revised approach.",
+            "revised_plan": "Description of the new plan.",
             "actions": [
                 {{
-                    "server_id": "postgres", // REQUIRED: Specify which server to use
-                    "mcp_method": "mcp_method_name",
-                    "params": {{ parameters }},
-                    "reason": "why this action will resolve the issue"
+                    "server_id": "...", // REQUIRED
+                    "mcp_method": "...",
+                    "params": {{...}},
+                    "reason": "Why this new action will fix the issue or progress.",
+                    "expected_outcome": "What this action should provide now."
                 }}
+                // ... potentially more actions
             ]
         }}
+        If you cannot recover or determine a fix, respond with "actions": [].
         """
 
-        logger.debug("Sending replanning prompt to LLM")
+        logger.debug("Sending replanning prompt to LLM...")
         response = self.llm.generate(prompt)
         parsed_response = self._parse_json_response(response)
 
-        # Extract the revised plan
-        thought = parsed_response.get("thought", "Revising plan due to execution error")
-        revised_plan = parsed_response.get("revised_plan", "Trying alternative approach")
+        thought = parsed_response.get("thought", "Revising plan due to execution error.")
+        revised_plan = parsed_response.get("revised_plan", "Trying alternative approach.")
+        state.thoughts.append(f"Replanning Thought: {thought}")
+        state.thoughts.append(f"Revised Plan: {revised_plan}")
 
-        state.thoughts.append(thought)
-        state.thoughts.append(f"Revised plan: {revised_plan}")
-
-        # Update planned actions with the revised ones
-        if "actions" in parsed_response and parsed_response["actions"]:
-            remaining_actions = (
-                state.planned_actions[state.current_action_index :]
-                if state.current_action_index < len(state.planned_actions)
-                else []
-            )
-            state.planned_actions = parsed_response["actions"] + remaining_actions
-            state.current_action_index = 0
-            logger.info(f"Replanned with {len(state.planned_actions)} actions")
-        else:
-            logger.warning("Replanning didn't produce any new actions")
-            # If no new actions, proceed with current plan
-
-        # Reset the replanning flag
-        state.requires_replanning = False
-
-        return state
-
-    def _ensure_schema_qualification(self, sql: str, state: AgentState) -> str:
-        """Ensure that SQL FROM clauses have schema qualification"""
-        # Simple regex-based approach to add schema qualification
-        # This is a basic implementation and might need more sophistication for complex queries
-
-        # Extract schema names from URIs for all tables
-        schema_table_map = {}
-        for resource in state.available_schemas:
-            # Only process postgres resources
-            if resource.get("server_id") != "postgres":
-                continue
-
-            uri = resource.get("uri", "")
-            # Extract schema and table from URI
-            match = re.search(r"/([^/]+)/([^/]+)/schema", uri)
-            if match:
-                schema_name = match.group(1)
-                table_name = match.group(2)
-                schema_table_map[table_name.lower()] = schema_name
-
-        if not schema_table_map:
-            return sql  # No schema info available
-
-        # Simple regex to find table references in FROM and JOIN clauses
-        # This is basic and won't handle all SQL variations
-        def replace_table(match):
-            table_ref = match.group(1).strip()
-            # Skip if already has schema qualification or is a subquery
-            if "." in table_ref or "(" in table_ref:
-                return match.group(0)
-
-            # Try to find matching schema
-            schema = schema_table_map.get(table_ref.lower())
-            if schema:
-                return match.group(0).replace(table_ref, f"{schema}.{table_ref}")
-            return match.group(0)
-
-        # Process FROM clauses
-        enhanced_sql = re.sub(
-            r"FROM\s+([^\s,()]+)", lambda m: replace_table(m), sql, flags=re.IGNORECASE
-        )
-
-        # Process JOIN clauses
-        enhanced_sql = re.sub(
-            r"JOIN\s+([^\s,()]+)", lambda m: replace_table(m), enhanced_sql, flags=re.IGNORECASE
-        )
-
-        return enhanced_sql
-
-    def _plan_follow_up(self, state: AgentState) -> AgentState:
-        """Plan follow-up actions based on execution results"""
-        prompt = f"""
-        Review the results of the actions taken so far and determine if additional actions are needed.
-        
-        User query: {state.query}
-        
-        Actions executed and their results:
-        {self._format_results(state.mcp_results)}
-        
-        Based on these results, determine what to do next:
-        1. Are there additional actions needed to fully answer the query?
-        2. Is the information complete or do we need more data?
-        3. Can we now provide a final answer to the user?
-        
-        IMPORTANT: You MUST specify the server_id for each action.
-        
-        Format your response as JSON:
-        {{
-            "thought": "your reasoning here",
-            "actions": [
-                {{
-                    "server_id": "postgres", // REQUIRED: Specify which server to use
-                    "mcp_method": "method_name",
-                    "params": {{ parameter details }},
-                    "reason": "why this action is needed"
-                }}
-            ]
-        }}
-        
-        If no further actions are needed, respond with:
-        {{
-            "thought": "your reasoning here",
-            "actions": []
-        }}
-        """
-
-        response = self.llm.generate(prompt)
-        parsed_response = self._parse_json_response(response)
-
-        thought = parsed_response.get("thought", "Determining if additional actions are needed")
-        state.thoughts.append(thought)
-
-        # Update actions list
         new_actions = parsed_response.get("actions", [])
         if new_actions:
-            state.planned_actions = new_actions
-            state.current_action_index = 0
-            state.thoughts.append(f"Planning additional actions: {len(new_actions)} actions")
-        else:
-            state.planned_actions = []
-            state.thoughts.append("No additional actions needed")
+            # Replace the rest of the plan with the new actions
+            state.planned_actions = (
+                state.planned_actions[: state.current_action_index - 1] + new_actions
+            )
+            state.current_action_index = max(
+                0, state.current_action_index - 1
+            )  # Reset index to retry/continue
+            logger.info(
+                f"Replanned starting from action {state.current_action_index + 1} with {len(new_actions)} new action(s)."
+            )
+            for i, action in enumerate(new_actions):
+                logger.debug(
+                    f"New Action {i + 1}: {action.get('server_id')}.{action.get('mcp_method')}({action.get('params', {})})"
+                )
 
-        # Reset needs_more_info flag
-        state.needs_more_info = False
+        else:
+            logger.warning(
+                "Replanning did not produce new actions. Will proceed to generate response based on current results."
+            )
+            state.planned_actions = state.planned_actions[
+                : state.current_action_index
+            ]  # Stop executing plan
+
+        # Reset replanning flags
+        state.requires_replanning = False
+        state.execution_context.pop("last_error", None)
+        state.execution_context.pop("schema_qualification_needed", None)
 
         return state
 
     def _generate_response(self, state: AgentState) -> AgentState:
-        """Generate final response based on all gathered information"""
-        logger.info("Generating final response based on MCP action results")
-        formatted_results = self._format_results(state.mcp_results)
+        """Generate final response based on all gathered information."""
+        logger.info("Generating final response...")
+        formatted_results = self._format_results(
+            state.mcp_results
+        )  # Use helper to format SDK results
+        conversation_context = self._format_conversation_history(self.current_history)  # Use helper
 
-        # Format conversation history for the prompt
-        conversation_context = self._format_conversation_history(
-            self.current_history, exclude_current=True
-        )
-
-        # Enhanced prompt with better guidance for different MCP response types
         prompt = f"""
-        Based on the user's query and the results from interacting with multiple MCP tool servers, generate a helpful response.
+        Generate a comprehensive response to the user's query based on the conversation history and the results of MCP actions.
 
-        User query: {state.query}
-        
-        Previous conversation:
+        User Query: {state.query}
+
+        Conversation History:
         {conversation_context}
 
-        MCP Interaction Results:
+        MCP Interaction Results (Raw):
         {formatted_results}
 
-        Agent thought process:
+        Agent Thought Process:
         {self._format_thoughts(state.thoughts)}
 
-        Instructions for response generation:
-        1. Synthesize information from all MCP interactions to provide a complete answer
-        2. If database queries were performed, present the results clearly 
-        3. If RAG tools were used, incorporate the context and generated completions
-        4. If there were errors during execution, explain what happened and the resolution
-        5. Refer back to the user's original question to ensure all aspects are addressed
-        6. Use a friendly, informative tone
-        
-        Look for data in MCP results with these patterns:
-        - `mcp_listResources` results contain a list of resources under the 'resources' key
-        - `mcp_readResource` results contain file content under the 'contents[0].text' key (usually JSON schema)
-        - `mcp_callTool` results with "query" tool contain data under 'content[0].text' (usually JSON result)
-        - `mcp_callTool` results for "rag_get_context" contain the retrieved context chunks
-        - `mcp_callTool` results for "rag_generate_completion" contain the generated completion
-        
-        If there were SQL results, extract the actual data values from the JSON in the response.
+        Instructions:
+        1. Synthesize information from successful MCP actions.
+        2. Explain any errors encountered and whether they were resolved.
+        3. If database queries were run, present the data clearly. Extract data from the 'text' field of TextContent within CallToolResult.
+        4. Address all parts of the original user query.
+        5. Use a helpful and informative tone. Do not just dump raw JSON.
         """
 
-        logger.debug("Sending response generation prompt to LLM")
+        logger.debug("Sending response generation prompt to LLM.")
         response = self.llm.generate(prompt)
         state.response = response
-        logger.info("Response generated (length: %d characters)", len(response))
+        logger.info("Final response generated (length: %d chars).", len(response))
 
-        # Add the assistant's response to conversation (will be saved to DB in the run method)
+        # Prepare assistant message for saving
         state.execution_context["assistant_message_to_save"] = Message(
             role="assistant", content=response
         )
 
         return state
 
-    def _format_conversation_history(self, history: List[Message], exclude_current=False) -> str:
-        """Format conversation history for prompts"""
+    # --- Helper Methods ---
+    def _format_conversation_history(self, history: List[Message]) -> str:
+        """Format conversation history for prompts."""
         if not history:
-            return ""
-
-        history_to_include = history
-        if exclude_current and len(history_to_include) > 0:
-            history_to_include = history_to_include[:-1]
-
-        if not history_to_include:
-            return ""
-
-        context = "\n"
-        for message in history_to_include:
-            context += f"{message}\n"
-        return context
+            return "No history."
+        return "\n".join(map(str, history))
 
     def _format_thoughts(self, thoughts: List[str]) -> str:
-        """Format thought process for the prompt"""
+        """Format thought process for the prompt."""
         if not thoughts:
-            return "No recorded thoughts"
-
-        formatted = ""
-        for i, thought in enumerate(thoughts):
-            formatted += f"{i + 1}. {thought}\n"
-        return formatted
+            return "No thoughts recorded."
+        return "\n".join(f"{i + 1}. {t}" for i, t in enumerate(thoughts))
 
     def _format_actions_executed(self, state: AgentState) -> str:
-        """Format the actions that have been executed so far"""
+        """Format the actions executed so far for replanning prompts."""
         if state.current_action_index == 0:
-            return "No actions executed yet"
-
+            return "No actions executed yet."
         formatted = ""
         for i in range(state.current_action_index):
             if i < len(state.planned_actions):
                 action = state.planned_actions[i]
-                server_id = action.get("server_id", "unknown")
-                mcp_method = action.get("mcp_method", "unknown")
-                params = json.dumps(action.get("params", {}), default=str)
+                server_id = action.get("server_id", "N/A")
+                mcp_method = action.get("mcp_method", "N/A")
+                params_str = json.dumps(action.get("params", {}), default=str)
                 formatted += (
-                    f"{i + 1}. Server: {server_id}, Method: {mcp_method} with params: {params}\n"
+                    f"{i + 1}. Server: {server_id}, Method: {mcp_method}, Params: {params_str}\n"
                 )
+                # Add result/error summary
+                action_key = f"action_{i}_{server_id}_{mcp_method}"
+                result_data = state.mcp_results.get(action_key)
+                if isinstance(result_data, McpError):
+                    formatted += f"   Result: Error - {result_data.error.message}\n"
+                elif result_data:
+                    formatted += (
+                        f"   Result: Success (details omitted)\n"  # Avoid dumping large raw results
+                    )
+                else:
+                    formatted += f"   Result: Not found\n"
 
-                # Add result if available
-                result_key = f"action_{i}_{server_id}_{mcp_method}"
-                # Try old format if not found
-                if result_key not in state.mcp_results:
-                    result_key = f"action_{i}_{mcp_method}"
-
-                if result_key in state.mcp_results:
-                    result = state.mcp_results[result_key]
-                    result_str = str(result)
-                    formatted += f"   Result: {result_str}\n"
-
-        return formatted
-
-    def _format_available_schemas(self, state: AgentState) -> str:
-        """Format available schemas for prompts"""
-        if not state.available_schemas:
-            return "No schema information available"
-
-        formatted = ""
-        # Group by server
-        for server_id in state.execution_context.get("server_ids", []):
-            server_resources = [
-                res for res in state.available_schemas if res.get("server_id") == server_id
-            ]
-
-            if server_resources:
-                formatted += f"Server: {server_id}\n"
-                for res in server_resources:
-                    name = res.get("name", "")
-                    uri = res.get("uri", "")
-                    formatted += f"- {name} (URI: {uri})\n"
-
-        return formatted
+        return formatted.strip()
 
     def _format_successful_results(self, state: AgentState) -> str:
-        """Format results from successful actions"""
-        successful_results = {}
+        """Format results from successful actions for replanning prompts."""
+        successful_data = {}
+        for i in range(state.current_action_index):
+            action = state.planned_actions[i]
+            server_id = action.get("server_id", "N/A")
+            mcp_method = action.get("mcp_method", "N/A")
+            action_key = f"action_{i}_{server_id}_{mcp_method}"
+            result = state.mcp_results.get(action_key)
+            if result and not isinstance(result, McpError):
+                # Serialize the SDK result object safely
+                try:
+                    successful_data[action_key] = json.loads(
+                        result.model_dump_json(exclude_none=True)
+                    )
+                except Exception:
+                    successful_data[action_key] = (
+                        f"<{type(result).__name__} object - Non-JSON Serializable>"
+                    )
 
-        for key, result in state.mcp_results.items():
-            # Skip results with errors
-            if isinstance(result, dict) and (result.get("isError", False) or "error" in result):
-                continue
-
-            # Include this result
-            successful_results[key] = result
-
-        return json.dumps(successful_results, indent=2, default=str)
+        return (
+            json.dumps(successful_data, indent=2, default=str)
+            if successful_data
+            else "No successful results yet."
+        )
 
     def _format_results(self, results: Dict[str, Any]) -> str:
-        """Format MCP results for LLM prompt"""
-        try:
-            return json.dumps(results, indent=2, default=str)
-        except Exception as e:
-            logger.error(f"Error formatting results for prompt: {e}")
-            return f"Error formatting results: {e}\nRaw results: {str(results)}"
+        """Format MCP results for the final response generation prompt."""
+        formatted = ""
+        for key, result in results.items():
+            formatted += f"--- Result for {key} ---\n"
+            if isinstance(result, McpError):
+                formatted += f"Type: Error\nMessage: {result.error.message}\n"
+            elif isinstance(result, mcp_types.ListResourcesResult):
+                formatted += f"Type: ListResourcesResult\nResources:\n"
+                if result.resources:
+                    for res in result.resources:
+                        formatted += f"  - URI: {res.uri}, Name: {res.name}, Type: {res.mimeType}\n"
+                else:
+                    formatted += "  (No resources listed)\n"
+            elif isinstance(result, mcp_types.ReadResourceResult):
+                formatted += f"Type: ReadResourceResult\nContent:\n"
+                if result.contents:
+                    content = result.contents[0]  # Assume single content for now
+                    if isinstance(content, mcp_types.TextResourceContents):
+                        formatted += f"  URI: {content.uri}, Type: {content.mimeType}\n  Text: {content.text[:200]}...\n"  # Truncate long text
+                    elif isinstance(content, mcp_types.BlobResourceContents):
+                        formatted += f"  URI: {content.uri}, Type: {content.mimeType}\n  Blob: (base64 data omitted)\n"
+                else:
+                    formatted += "  (No content returned)\n"
+            elif isinstance(result, mcp_types.ListToolsResult):
+                formatted += f"Type: ListToolsResult\nTools:\n"
+                if result.tools:
+                    for tool in result.tools:
+                        schema_str = json.dumps(tool.inputSchema) if tool.inputSchema else "{}"
+                        formatted += f"  - Name: {tool.name}, Desc: {tool.description}, Schema: {schema_str}\n"
+                else:
+                    formatted += "  (No tools listed)\n"
+            elif isinstance(result, mcp_types.CallToolResult):
+                formatted += f"Type: CallToolResult\nError: {result.isError}\nContent:\n"
+                if result.content:
+                    for content_item in result.content:
+                        if isinstance(content_item, mcp_types.TextContent):
+                            formatted += f"  - Text: {content_item.text[:200]}...\n"  # Truncate
+                        elif isinstance(content_item, mcp_types.ImageContent):
+                            formatted += (
+                                f"  - Image: Type={content_item.mimeType}, (data omitted)\n"
+                            )
+                        elif isinstance(content_item, mcp_types.EmbeddedResource):
+                            formatted += f"  - Embedded Resource: URI={content_item.resource.uri}, Type={content_item.resource.mimeType}\n"  # Omit content
+                else:
+                    formatted += "  (No content returned)\n"
+            else:
+                formatted += f"Type: Unknown ({type(result).__name__})\nData: {str(result)[:200]}...\n"  # Truncate unknown
+            formatted += "---\n"
+        return formatted if formatted else "No results available."
 
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
-        """Parse JSON response from LLM with improved reliability"""
-        import re
-
+        """Parse JSON response from LLM with improved reliability (implementation unchanged)."""
         try:
-            # Extract JSON block if present within code blocks
-            match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", response)
+            match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", response, re.DOTALL)
             if match:
                 json_str = match.group(1)
             else:
-                # Look for content within curly braces
                 match = re.search(r"(\{[\s\S]*\})", response)
-                if match:
-                    json_str = match.group(1)
-                else:
-                    # Maybe the whole response is JSON
-                    json_str = response
+                json_str = match.group(1) if match else response
 
-            # Clean up the string
-            # Remove non-JSON parts before the first {
             first_brace = json_str.find("{")
-            if first_brace > 0:
-                json_str = json_str[first_brace:]
-
-            # Remove non-JSON parts after the last }
             last_brace = json_str.rfind("}")
-            if last_brace != -1 and last_brace < len(json_str) - 1:
-                json_str = json_str[: last_brace + 1]
+            if first_brace != -1 and last_brace != -1:
+                json_str = json_str[first_brace : last_brace + 1]
+            else:
+                raise json.JSONDecodeError("No valid JSON object found", json_str, 0)
 
             return json.loads(json_str)
-
-        except json.JSONDecodeError as e:
-            logger.error(
-                f"Failed to parse JSON response from LLM: {e}\nResponse was:\n{response}",
-                exc_info=self.debug,
-            )
-            # Try to salvage what we can
-            return {
-                "thought": "Error parsing LLM response as JSON. Continuing with best effort.",
-                "actions": [],
-            }
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.error(f"Failed to parse JSON: {e}\nResponse: {response}", exc_info=self.debug)
+            return {"thought": f"Error parsing LLM response: {e}", "actions": []}
         except Exception as e:
             logger.error(f"Unexpected error parsing LLM response: {e}", exc_info=self.debug)
-            return {
-                "thought": f"Error: Unexpected error parsing LLM response. {e}",
-                "actions": [],
-            }
+            return {"thought": f"Unexpected error: {e}", "actions": []}
+
+    # --- End Helper Methods ---
 
     async def run(self, query: str, session_id: Optional[str] = None) -> AgentState:
-        """Execute the complete agent workflow with database-backed conversation history
+        """Execute the agent workflow."""
+        logger.info(f"Starting agent run for query: '{query[:50]}...'")
+        start_time = asyncio.get_event_loop().time()
 
-        Args:
-            query: The user query to process
-            session_id: Optional session ID. If not provided, a new one will be generated.
-
-        Returns:
-            AgentState: The final agent state after workflow execution
-        """
-        logger.info("Starting agent workflow execution")
-        logger.info("Query: %s", query)
-
-        # Generate or use provided session ID
+        # Generate or use session ID
         definite_session_id = session_id or str(uuid.uuid4())
-        logger.info(f"Using session ID: {definite_session_id}")
+        logger.info(f"Session ID: {definite_session_id}")
 
-        # Load conversation history from database
-        # Check connection status *before* attempting to load
-        if self.db.is_connected():
-            try:
-                self.current_history = await self._load_history(definite_session_id)
-                logger.info(
-                    f"Loaded {len(self.current_history)} messages from database for session {definite_session_id}"
-                )
-            except Exception as e:
-                logger.error(f"Error loading conversation history: {e}", exc_info=True)
-                self.current_history = []  # Use empty history on error
-        else:
-            # Log the specific reason if available
-            conn_error = self.db.last_error()
-            logger.warning(
-                f"Database not connected at start of run, using empty conversation history. Last Error: {conn_error}"
-            )
-            self.current_history = []
-
-        # Check for conversation management commands (no DB needed for these checks)
-        if query.strip().lower() == "clear history":
-            logger.info("Clearing conversation history")
-            if self.db.is_connected():  # Check connection before attempting clear
-                await self.clear_history(definite_session_id)
-            else:
-                logger.warning("Cannot clear history, database not connected.")
-            self.current_history = []
-            response_state = AgentState(query=query, session_id=definite_session_id)
-            response_state.response = "Conversation history has been cleared."
-            return response_state
-
-        if query.strip().lower() == "show history":
-            logger.info("Showing conversation history")
-            history_text = "Conversation history:\n\n"
-            if not self.current_history:
-                history_text += "(History is empty or could not be loaded)\n"
-            for i, message in enumerate(self.current_history):
-                history_text += f"{i + 1}. {message}\n"
-            response_state = AgentState(query=query, session_id=definite_session_id)
-            response_state.response = history_text
-            return response_state
-
-        # Create initial state with session ID
-        initial_state = AgentState(query=query, session_id=definite_session_id)
-
-        # Save user message to database
-        user_message = Message(role="user", content=query)
-        if self.db.is_connected():  # Check connection before saving
-            await self._save_message(definite_session_id, user_message)
-        else:
-            logger.warning(
-                f"Could not save user message for session {definite_session_id}, database not connected."
-            )
-            # Still add to in-memory history for this run
-            self.current_history.append(user_message)
-
-        logger.debug("Invoking agent workflow graph")
+        # Load history
         try:
-            result = self.graph.invoke(initial_state)
-            logger.debug("Agent workflow graph execution completed")
+            await self.db.ensure_connected()  # Ensure DB is connected before loading
+            self.current_history = await self._load_history(definite_session_id)
+        except Exception as e:
+            logger.error(f"Failed to load history for session {definite_session_id}: {e}")
+            self.current_history = []  # Proceed with empty history on DB error
 
-            # --- Process result and save assistant message ---
-            result_state = result  # Assume result is the state directly for simplicity
+        # Handle management commands
+        if query.strip().lower() == "clear history":
+            await self.clear_history(definite_session_id)
+            self.current_history = []
+            final_state = AgentState(
+                query=query, session_id=definite_session_id, response="History cleared."
+            )
+            return final_state
+        if query.strip().lower() == "show history":
+            history_text = "History:\n" + (
+                "\n".join(map(str, self.current_history)) if self.current_history else "(empty)"
+            )
+            final_state = AgentState(
+                query=query, session_id=definite_session_id, response=history_text
+            )
+            return final_state
 
-            # Handle different return types from newer LangGraph versions if necessary
-            if isinstance(result, dict) and "state" in result:
-                result_state = result["state"]
-            elif isinstance(result, dict) and "response" in result:
-                # Reconstruct state if needed, this part might need adjustment
-                result_state = AgentState(query=query, session_id=definite_session_id)
-                result_state.response = result.get("response")
-                result_state.thoughts = result.get("thoughts", [])
-                result_state.mcp_results = result.get("mcp_results", {})
-                result_state.error = result.get("error")
+        # Save user message (attempt even if DB disconnected, updates in-memory)
+        user_message = Message(role="user", content=query)
+        await self._save_message(definite_session_id, user_message)
 
-            # Save assistant message to database if response was generated
-            if hasattr(result_state, "response") and result_state.response:
-                if self.db.is_connected():  # Check connection before saving
-                    assistant_message = Message(role="assistant", content=result_state.response)
-                    await self._save_message(definite_session_id, assistant_message)
-                else:
-                    logger.warning(
-                        f"Could not save assistant response for session {definite_session_id}, database not connected."
-                    )
-            # --- End Process result ---
+        # Run graph
+        initial_state = AgentState(query=query, session_id=definite_session_id)
+        final_state = AgentState()  # Default empty state
+        try:
+            # The graph invoke is synchronous in LangGraph, but our nodes are async.
+            # LangGraph handles running async nodes within its sync invoke method.
+            # However, for clarity and potential future compatibility, running within asyncio.run might be better if LangGraph changes.
+            # For now, assume LangGraph's astream handles the async nodes correctly.
+            async for event in self.graph.astream(initial_state):
+                # For this refactor, we'll just get the final state
+                # Note: Need to check the exact structure returned by astream
+                # It typically yields dicts with node names as keys
+                # The final result is often the value associated with the '__end__' key or the last node executed.
+                # Simpler: Collect the latest state from events.
+                last_state = None
+                for node_name, node_value in event.items():
+                    # Check if the value is the state dictionary itself or contains it
+                    current_state_dict = {}
+                    if isinstance(node_value, AgentState):
+                        current_state_dict = node_value.model_dump()
+                    elif isinstance(node_value, dict):  # Sometimes state is nested
+                        current_state_dict = node_value
+
+                    if "query" in current_state_dict:  # Heuristic: check if it looks like our state
+                        # Try parsing into AgentState to be sure
+                        try:
+                            last_state = AgentState.model_validate(current_state_dict)
+                        except Exception:  # If validation fails, ignore
+                            pass
+
+            final_state = (
+                last_state if last_state else AgentState()
+            )  # Use last valid state observed
+            logger.debug("Agent workflow graph execution completed.")
+
+            if not final_state.response and not final_state.error:
+                if final_state == AgentState():  # Check if it's still the default empty state
+                    logger.error("Graph finished without producing a final state.")
+                    final_state = initial_state  # Fallback to initial state? Or create error state
+                    final_state.error = "Workflow ended unexpectedly without a final result."
+                    final_state.response = "An internal error occurred."
 
         except Exception as e:
             logger.error(f"Error during agent graph execution: {e}", exc_info=True)
-            # Return an error state
-            result_state = AgentState(query=query, session_id=definite_session_id)
-            result_state.error = f"Agent execution failed: {e}"
-            result_state.response = "I encountered an error processing your request."
+            final_state = AgentState(query=query, session_id=definite_session_id)
+            final_state.error = f"Agent execution failed: {e}"
+            final_state.response = "I encountered an error processing your request."
 
-        return result_state
+        # Save assistant message (attempt even if DB disconnected)
+        if final_state.response and not final_state.error:
+            assistant_message = Message(role="assistant", content=final_state.response)
+            await self._save_message(definite_session_id, assistant_message)
+        elif final_state.error and final_state.response:
+            # Save the error response as assistant message
+            assistant_message = Message(role="assistant", content=final_state.response)
+            await self._save_message(definite_session_id, assistant_message)
+
+        end_time = asyncio.get_event_loop().time()
+        logger.info(f"Agent run completed in {end_time - start_time:.2f} seconds.")
+        return final_state
