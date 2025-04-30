@@ -57,37 +57,36 @@ class CMMCPManager:
                 return self.sessions[server_id]
 
             # Wait for existing initialization task if in progress
-            if server_id in self._init_tasks:
-                return await self._init_tasks[server_id]
+            if server_id in self._init_tasks and not self._init_tasks[server_id].done():
+                try:
+                    return await self._init_tasks[server_id]
+                except Exception as e:
+                    self._init_tasks.pop(server_id, None)
+                    raise e
 
-            # Start new initialization
-            init_future: asyncio.Future[ClientSession] = asyncio.Future()
-            self._init_tasks[server_id] = asyncio.create_task(init_future)
+            init_task = asyncio.create_task(self._create_and_initialize_session(server_id))
 
-        # Initialize outside the lock to prevent deadlocks
-        try:
-            session = await self._create_and_initialize_session(server_id)
             async with self._lock:
-                self.sessions[server_id] = session
-                init_future.set_result(session)
-                self._init_tasks.pop(server_id, None)
-            return session
-        except Exception as e:
-            # Convert to McpError for consistent error handling
-            error = (
-                e
-                if isinstance(e, McpError)
-                else McpError(
-                    ErrorData(
-                        code=INTERNAL_ERROR, message=f"Session initialization error: {str(e)}"
+                self._init_tasks[server_id] = init_task
+
+            try:
+                session = await init_task
+                async with self._lock:
+                    self.sessions[server_id] = session
+                    return session
+            except Exception as e:
+                error = (
+                    e
+                    if isinstance(e, McpError)
+                    else McpError(
+                        ErrorData(
+                            code=INTERNAL_ERROR, message=f"Session initiialization error :{str(e)}"
+                        )
                     )
                 )
-            )
-            async with self._lock:
-                if not init_future.done():
-                    init_future.set_exception(error)
-                self._init_tasks.pop(server_id, None)
-            raise error
+                async with self._lock:
+                    self._init_tasks.pop(server_id, None)
+                raise error
 
     async def get_all_sessions(self) -> Dict[str, ClientSession]:
         """
@@ -98,28 +97,40 @@ class CMMCPManager:
         """
         # MCP server types we should initialize
         mcp_connector_types = {
-            "agent_tool",
-            "endpoint",
-            "api",
-            "postgres",  # For database servers
+            "agent_tool",  # for MCP servers
         }
 
         connector_ids_to_initialize = set()
 
+        # TODO: DEBUG - delete
+        logger.info(f"Connectors before loop: {self.config_manager.connectors}")
+        logger.info(f"Array Connectors before loop: {self.config_manager.array_connectors}")
+
         # Process regular connectors
         if self.config_manager.connectors:
             for connector in self.config_manager.connectors:
+                # TODO: DEBUG - delete
+                logger.info(f"Checking regular connector type: {connector.type}")
+
                 if connector.type in mcp_connector_types:
                     connector_ids_to_initialize.add(connector.config_id)
 
         # Process array connectors
         if self.config_manager.array_connectors:
             for array_connector in self.config_manager.array_connectors:
-                if array_connector.type in mcp_connector_types and array_connector.stack_ids:
+                # TODO: DEBUG - delete
+                logger.info(f"Checking array connector type: {array_connector.type}")
+
+                if array_connector.type in mcp_connector_types:
                     # Add the main connector ID
                     connector_ids_to_initialize.add(array_connector.config_id)
-                    # Add any stack IDs for multi-instance connectors
-                    connector_ids_to_initialize.update(array_connector.stack_ids)
+
+                    if array_connector.stack_ids:
+                        # Add any stack IDs for multi-instance connectors
+                        connector_ids_to_initialize.update(array_connector.stack_ids)
+
+        # TODO: DEBUG - delete
+        logger.info(f"Final connector IDs to initialize: {connector_ids_to_initialize}")
 
         if not connector_ids_to_initialize:
             logger.warning("ConfigManager has no MCP-related connectors registered.")
@@ -137,7 +148,9 @@ class CMMCPManager:
                 session = await task
                 results[server_id] = session
             except Exception as e:
-                logger.warning(f"Failed to initialize session for '{server_id}': {e}")
+                logger.warning(
+                    f"Failed to initialize session for '{server_id}': {e}", exc_info=True
+                )
                 # Skip this server but continue with others
 
         logger.info(f"Successfully initialized {len(results)} MCP sessions.")
@@ -145,6 +158,10 @@ class CMMCPManager:
 
     async def _create_and_initialize_session(self, server_id: str) -> ClientSession:
         """Create and initialize a session with proper context management."""
+        server_to_module = {
+            "agentTools": "src.mcp.postgres_mcp_server",
+        }
+
         try:
             # Get connection parameters from SDK
             url_or_cmd, headers = get_api_parameters(server_id)
@@ -158,15 +175,30 @@ class CMMCPManager:
 
             # Determine transport based on deployment type
             if config.LOCAL_DEV:
-                # Local development with stdio transport
-                command = "uv"
-                args = ["run", server_id]
-                env_vars = {k.upper().replace("-", "_"): v for k, v in (headers or {}).items()}
+                if server_id in server_to_module and server_to_module[server_id]:
+                    # Use stdio transport for local development
+                    command = "python"
+                    args = ["-m", server_to_module[server_id]]
+                    env_vars = {k.upper().replace("-", "_"): v for k, v in (headers or {}).items()}
 
-                # Use the exit stack to manage the transport context
-                streams = await self._exit_stack.enter_async_context(
-                    stdio_client(StdioServerParameters(command=command, args=args, env=env_vars))
-                )
+                    env_vars["LOCAL_DEV"] = "True"
+
+                    logger.info(f"Connecting to server {server_id} using stdio transport")
+                    streams = await self._exit_stack.enter_async_context(
+                        stdio_client(
+                            StdioServerParameters(command=command, args=args, env=env_vars)
+                        )
+                    )
+                else:
+                    # For unknown servers, assume they're already running and use SSE
+                    if not url_or_cmd.startswith("http"):
+                        url_or_cmd = f"http://{url_or_cmd}"
+
+                    logger.info(f"Connecting to server {server_id} at {url_or_cmd}/sse")
+                    streams = await self._exit_stack.enter_async_context(
+                        sse_client(f"{url_or_cmd}/sse", headers=headers or {})
+                    )
+
             else:
                 # Remote deployment with SSE transport
                 if not isinstance(url_or_cmd, str) or not url_or_cmd.startswith("http"):
