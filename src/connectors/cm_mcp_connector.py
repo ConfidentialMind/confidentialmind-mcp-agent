@@ -182,6 +182,7 @@ class CMMCPManager:
                     env_vars = {k.upper().replace("-", "_"): v for k, v in (headers or {}).items()}
 
                     env_vars["LOCAL_DEV"] = "True"
+                    env_vars["PYTHONUNBUFFERED"] = "1"
 
                     logger.info(f"Connecting to server {server_id} using stdio transport")
                     streams = await self._exit_stack.enter_async_context(
