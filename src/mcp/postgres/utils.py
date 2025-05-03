@@ -7,11 +7,14 @@ from typing import Any, Dict, List
 def sanitize_error(error_message: str) -> str:
     """Sanitize error messages to remove sensitive information.
     
+    Replaces sensitive information in database error messages with asterisks
+    to prevent leaking credentials or connection details.
+    
     Args:
-        error_message: The original error message
+        error_message: The original error message that might contain sensitive information
         
     Returns:
-        str: Sanitized error message
+        str: Sanitized error message with sensitive information redacted
     """
     # Remove connection strings, passwords, etc.
     sanitized = re.sub(r'password=\S+', 'password=***', str(error_message))
@@ -24,11 +27,12 @@ def format_table_results(rows: List[Dict[str, Any]], max_rows: int = 100) -> str
     """Format database query results as a readable table.
     
     Args:
-        rows: The query result rows
+        rows: The query result rows, each row is a dictionary mapping column names to values
         max_rows: Maximum number of rows to include in the output
         
     Returns:
-        str: Formatted table output
+        str: Formatted table output with column headers, separator line, and rows of data.
+             If there are more rows than max_rows, a truncation note is added.
     """
     if not rows:
         return "No results found."
@@ -60,10 +64,14 @@ def format_table_schema(schema: Dict[str, Any]) -> str:
     """Format table schema as markdown.
     
     Args:
-        schema: The table schema information
+        schema: The table schema information with keys:
+               - schema_name: str - The schema name
+               - table_name: str - The table name
+               - columns: List[Dict[str, Any]] - List of column definitions
+               - primary_keys: List[str] - List of primary key column names
         
     Returns:
-        str: Markdown formatted schema
+        str: Markdown formatted schema with table header, primary keys, and columns in a table format
     """
     schema_name = schema["schema_name"]
     table_name = schema["table_name"]

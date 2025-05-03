@@ -8,6 +8,17 @@ A Model Context Protocol (MCP) server implementation for PostgreSQL databases th
 - **Database Exploration**: Discover database structure, schemas, and tables
 - **Table Schema Inspection**: Get detailed information about table structures
 - **Secure by Design**: Input validation, rate limiting, and read-only operations
+- **Connection Pool Monitoring**: Automatically logs pool usage statistics and warnings
+
+## Code Organization
+
+The PostgreSQL MCP server is organized with a clean separation of concerns:
+
+- `server.py` - Main server entry point with MCP tool and resource definitions
+- `database.py` - Database connection management and query execution via `DatabaseManager`
+- `validators.py` - SQL query validation functions to ensure read-only operations
+- `utils.py` - Utility functions for formatting results and sanitizing errors
+- `settings.py` - Configuration using Pydantic settings from environment variables
 
 ## Usage
 
@@ -43,10 +54,11 @@ MCP_TRANSPORT=http python -m src.mcp.postgres
 
 This server implements multiple security measures:
 
-1. **Read-only Validation**: Only allows SELECT queries
+1. **Read-only Validation**: Only allows SELECT queries through strict validation
 2. **Input Sanitization**: Prevents SQL injection and cleans error messages
 3. **Resource Limits**: Enforces query timeouts and result size limits
 4. **Rate Limiting**: Prevents overwhelming the database with too many queries
+5. **Connection Pool Management**: Monitors pool usage and logs warnings when approaching capacity
 
 ## MCP Tools and Resources
 
@@ -59,6 +71,17 @@ This server implements multiple security measures:
 ### Resources
 
 - Table schemas exposed as resources with URI pattern: `postgres:///{schema_name}/{table_name}`
+
+## Testing
+
+The server includes integration tests that verify its functionality against a real PostgreSQL database:
+
+- `test_database.py`: Tests `DatabaseManager` operations
+- `test_validators.py`: Tests SQL query validation
+- `test_utils.py`: Tests formatting utilities
+- `test_postgres_server.py`: Tests MCP tools and resources
+
+All tests follow an integration testing strategy without mocks, requiring a properly configured test database.
 
 ## Database Access Requirements
 

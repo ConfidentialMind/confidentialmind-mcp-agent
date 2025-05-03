@@ -11,7 +11,9 @@ def is_read_only_query(query: str) -> Tuple[bool, str]:
         query: The SQL query to check
         
     Returns:
-        Tuple[bool, str]: (is_valid, reason)
+        Tuple[bool, str]: A tuple where:
+            - first element is a boolean indicating if the query is read-only (True) or not (False)
+            - second element is a string containing an error message if not read-only, or empty string if valid
     """
     query = query.strip().lower()
     
@@ -55,7 +57,9 @@ def has_reasonable_limits(query: str) -> Tuple[bool, str]:
         query: The SQL query to check
         
     Returns:
-        Tuple[bool, str]: (is_valid, reason)
+        Tuple[bool, str]: A tuple where:
+            - first element is a boolean indicating if the query has reasonable limits (True) or not (False)
+            - second element is a string containing an error message if limits are needed, or empty string if valid
     """
     query = query.strip().lower()
     
@@ -82,7 +86,9 @@ def validate_query(query: str) -> Tuple[bool, str]:
         query: The SQL query to check
         
     Returns:
-        Tuple[bool, str]: (is_valid, reason)
+        Tuple[bool, str]: A tuple where:
+            - first element is a boolean indicating if the query is valid (True) or invalid (False)
+            - second element is a string containing an error message if invalid, or empty string if valid
     """
     # Check if query is read-only
     is_ro, reason = is_read_only_query(query)

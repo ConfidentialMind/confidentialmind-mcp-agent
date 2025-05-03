@@ -6,17 +6,15 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Iterable, List
+from typing import Iterable
 
-from pydantic import AnyUrl
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.lowlevel.helper_types import ReadResourceContents
-from mcp.types import Resource as MCPResource
 
-from src.mcp.postgres.database import DatabaseManager
-from src.mcp.postgres.settings import PostgresSettings
-from src.mcp.postgres.utils import format_table_results, format_table_schema
+from .database import DatabaseManager
+from .settings import PostgresSettings
+from .utils import format_table_results, format_table_schema
 
 
 # Initialize settings
@@ -57,32 +55,7 @@ class RateLimiter:
 rate_limiter = RateLimiter(rate_limit_seconds=settings.rate_limit)
 
 
-# Resource implementation
-@mcp.resource
-async def list_resources() -> List[MCPResource]:
-    """List all tables in the database as resources.
-    
-    Returns:
-        List[MCPResource]: List of database tables as MCP resources
-    """
-    tables = await db_manager.get_all_tables()
-    resources = []
-    
-    for table in tables:
-        schema_name = table['table_schema']
-        table_name = table['table_name']
-        uri = f"postgres:///{schema_name}/{table_name}"
-        
-        resources.append(MCPResource(
-            uri=AnyUrl(uri),
-            name=f"{schema_name}.{table_name}",
-            description=f"Schema for {schema_name}.{table_name} table",
-            mimeType="application/json"
-        ))
-    
-    return resources
-
-
+# Resource implementation - use a template for handling table resources
 @mcp.resource("postgres:///{schema_name}/{table_name}")
 async def get_table_schema_resource(schema_name: str, table_name: str) -> Iterable[ReadResourceContents]:
     """Get the schema for a table.
@@ -218,9 +191,50 @@ async def describe_table(schema_name: str, table_name: str, ctx: Context) -> str
         return f"Error describing table {schema_name}.{table_name}: {str(e)}"
 
 
+@mcp.tool(
+    description="List all tables in the database as resources that can be accessed."
+)
+async def list_tables(ctx: Context) -> str:
+    """List all available tables in the database.
+    
+    This tool returns a list of all tables with their PostgreSQL resource URIs
+    that can be used to access schema information.
+    
+    Args:
+        ctx: MCP context for logging and progress reporting
+        
+    Returns:
+        str: Formatted list of tables with their resource URIs
+    """
+    try:
+        await ctx.report_progress(10, 100)
+        tables = await db_manager.get_all_tables()
+        await ctx.report_progress(80, 100)
+        
+        # Format output
+        result = ["# Available Database Tables", ""]
+        result.append("The following tables are available as resources:")
+        result.append("")
+        
+        for table in tables:
+            schema_name = table['table_schema']
+            table_name = table['table_name']
+            uri = f"postgres:///{schema_name}/{table_name}"
+            
+            result.append(f"- **{schema_name}.{table_name}**")
+            result.append(f"  - Resource URI: `{uri}`")
+            result.append("")
+        
+        await ctx.report_progress(100, 100)
+        return "\n".join(result)
+    except Exception as e:
+        await ctx.error(f"Error listing tables: {str(e)}")
+        return f"Error listing tables: {str(e)}"
+
+
 # Graceful shutdown handler
 @asynccontextmanager
-async def lifespan(app: FastMCP) -> None:
+async def lifespan(app: FastMCP):
     """Handle server lifecycle events.
     
     Args:
@@ -234,7 +248,7 @@ async def lifespan(app: FastMCP) -> None:
 
 
 # Main function to run the server
-def main() -> None:
+def main():
     """Run the PostgreSQL MCP server."""
     # Configure logging
     logging.basicConfig(
@@ -244,7 +258,8 @@ def main() -> None:
     
     # Initialize and run the server
     transport = os.environ.get("MCP_TRANSPORT", "stdio")
-    mcp.run(transport=transport, lifespan=lifespan)
+    mcp.settings.lifespan = lifespan
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":
