@@ -12,3 +12,5 @@ __pycache__/
 
 agent_instructions/
 agent_references/
+agent_prompts/
+.claude/
