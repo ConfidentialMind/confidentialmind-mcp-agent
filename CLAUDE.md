@@ -79,10 +79,6 @@ This document contains critical information about working with this codebase. Fo
      - Add None checks
      - Narrow string types
      - Match existing patterns
-   - Pytest:
-     - If the tests aren't finding the anyio pytest mark, try adding PYTEST_DISABLE_PLUGIN_AUTOLOAD=""
-       to the start of the pytest run command eg:
-       `PYTEST_DISABLE_PLUGIN_AUTOLOAD="" uv run --frozen pytest`
 
 3. Best Practices
    - Check git status before commits

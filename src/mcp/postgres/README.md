@@ -83,6 +83,29 @@ The server includes integration tests that verify its functionality against a re
 
 All tests follow an integration testing strategy without mocks, requiring a properly configured test database.
 
+### Running Tests
+
+To run the tests, use the following command:
+
+```bash
+# Run all PostgreSQL tests, skipping trio backend tests
+PYTHONPATH=. uv run --frozen pytest tests/mcp/postgres/
+
+# Run tests with verbose output
+PYTHONPATH=. uv run --frozen pytest tests/mcp/postgres/ -vxs
+
+# Run specific test files
+PYTHONPATH=. uv run --frozen pytest tests/mcp/postgres/test_database.py
+PYTHONPATH=. uv run --frozen pytest tests/mcp/postgres/test_validators.py
+PYTHONPATH=. uv run --frozen pytest tests/mcp/postgres/test_utils.py
+```
+
+**Note:** The tests require:
+1. A running PostgreSQL instance
+2. Properly configured environment variables (see Usage section)
+3. The `PYTHONPATH=.` prefix to ensure imports work correctly
+4. The `-k "not trio"` flag to skip tests using the trio backend, as asyncpg is only compatible with asyncio
+
 ## Database Access Requirements
 
 For optimal security, create a dedicated read-only database user:
