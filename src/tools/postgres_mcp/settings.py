@@ -23,8 +23,6 @@ class PostgresSettings(BaseSettings):
         """Return the DSN string, constructing it if not provided explicitly."""
         if self.dsn:
             return self.dsn
-        # Construct DSN from individual components
-        # Ensure proper escaping if needed, though asyncpg handles basic cases
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
 
 
