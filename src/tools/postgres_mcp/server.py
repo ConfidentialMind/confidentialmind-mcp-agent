@@ -2,10 +2,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
+import asyncpg
 from fastmcp import Context, FastMCP
 
+from .db import create_pool  # Import create_pool directly instead of db_connection_pool
 from .db import (
-    db_connection_pool,
     execute_readonly_query,
     get_table_schemas,
 )
@@ -20,17 +21,18 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     pool = None
     state = {}
     try:
-        pool = await db_connection_pool().__aenter__()
+        # Create the pool directly without using another context manager
+        pool = await create_pool()
         state["db_pool"] = pool
+        logger.info("Database pool created and stored in application state.")
         yield state  # Provide the pool to the application state
     except ConnectionError as e:
         logger.critical(f"Database connection failed on startup: {e}")
-        # Optional: Decide if the server should fail to start
-        # raise # Re-raise to prevent server startup
         yield state  # Or yield empty state to allow server start but tools will fail
     finally:
         if pool:
-            await db_connection_pool().__aexit__(None, None, None)
+            logger.info("Shutting down server, closing database connection pool.")
+            await pool.close()
 
 
 # Instantiate the FastMCP server with the lifespan manager

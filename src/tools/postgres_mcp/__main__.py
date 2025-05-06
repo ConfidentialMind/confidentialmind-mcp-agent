@@ -12,6 +12,6 @@ if __name__ == "__main__":
         f"Starting Postgres MCP server for database '{settings.database}' on {settings.host}:{settings.port}"
     )
     try:
-        mcp_server.run()
+        mcp_server.run(transport="sse", port=8080)
     except Exception as e:
         logger.critical(f"Server failed to run: {e}", exc_info=True)

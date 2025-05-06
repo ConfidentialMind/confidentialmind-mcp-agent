@@ -1,7 +1,6 @@
 import asyncio
 import json
 
-import httpx
 from fastmcp import Client
 from fastmcp.exceptions import ClientError
 from mcp.types import TextContent, TextResourceContents
@@ -9,7 +8,6 @@ from mcp.types import TextContent, TextResourceContents
 
 async def run():
     """Test the Postgres MCP server using FastMCP Client."""
-    # Assuming the server is running on localhost:8000
     server_url = "http://localhost:8080/sse"
 
     try:
@@ -19,8 +17,7 @@ async def run():
         async with Client(server_url) as client:
             print("Connection established and initialized with FastMCP Client!")
 
-            # List available prompts (Note: FastMCP Client's list_prompts returns mcp.types.ListPromptsResult)
-            # For simplicity, let's assume we mainly care about the list itself.
+            # List available prompts
             prompts_result = await client.list_prompts_mcp()
             print(f"Available prompts: {[p.name for p in prompts_result.prompts]}")
 
@@ -40,7 +37,6 @@ async def run():
 
             # Check if our expected resource is available
             expected_resource = "postgres://schemas"
-            # FastMCP client's list_resources returns list[Resource], check URIs
             available_resources_uris = [str(r.uri) for r in resources_response]
 
             if expected_resource not in available_resources_uris:
@@ -50,7 +46,6 @@ async def run():
             # Test accessing the schemas resource
             print(f"\nTesting access to '{expected_resource}' resource...")
             try:
-                # read_resource returns list[TextResourceContents | BlobResourceContents]
                 schema_response_contents = await client.read_resource(expected_resource)
 
                 if schema_response_contents:
@@ -80,10 +75,9 @@ async def run():
             except Exception as e:
                 print(f"Error accessing schemas resource: {e}")
 
-            # Test executing a SQL query
+            # Test executing a SQL query for PostgreSQL version
             print("\nTesting 'execute_sql' tool with version query...")
             try:
-                # call_tool returns list[TextContent | ImageContent | ...]
                 query_result_content = await client.call_tool(
                     "execute_sql", {"sql_query": "SELECT version() AS version"}
                 )
@@ -106,7 +100,6 @@ async def run():
                 else:
                     print("Query executed but no content returned")
 
-            # Catch specific FastMCP ClientError for tool execution issues
             except ClientError as e:
                 print(f"Tool call 'execute_sql' (version) failed: {e}")
             except Exception as e:
@@ -162,6 +155,35 @@ async def run():
             except Exception as e:
                 print(f"Error executing tables query: {e}")
 
+            # Try a query to test the regex validation
+            print("\nTesting SQL query validation with EXPLAIN...")
+            try:
+                explain_query = """
+                EXPLAIN (FORMAT JSON)
+                SELECT 
+                    table_name, 
+                    column_name
+                FROM 
+                    information_schema.columns
+                WHERE 
+                    table_schema = 'public'
+                LIMIT 5
+                """
+
+                explain_result_content = await client.call_tool(
+                    "execute_sql", {"sql_query": explain_query}
+                )
+
+                if explain_result_content and isinstance(explain_result_content[0], TextContent):
+                    print("EXPLAIN query executed successfully")
+                else:
+                    print("EXPLAIN query returned unexpected or no content")
+
+            except ClientError as e:
+                print(f"Tool call 'execute_sql' (EXPLAIN) failed: {e}")
+            except Exception as e:
+                print(f"Error executing EXPLAIN query: {e}")
+
             # Test read-only validation by attempting to execute a write query
             print("\nTesting read-only validation with a write query (should fail)...")
             try:
@@ -171,21 +193,26 @@ async def run():
 
             except ClientError as e:
                 print(f"Write query properly rejected by tool: {e}")
-                print("Read-only validation likely working correctly on server-side.")
+                print("Read-only validation working correctly on server-side.")
             except Exception as e:
-                # Catch other potential errors during the call
                 print(f"An unexpected error occurred during the write query attempt: {e}")
 
-    # Keep original HTTP and connection error handling
-    except httpx.HTTPStatusError as e:
-        print(f"HTTP Error connecting to server: {e}")
-        print(f"Status code: {e.response.status_code}")
-        print(f"Response body: {e.response.text}")
-    except httpx.ConnectError:
-        print(f"Connection Error: Could not connect to server at {server_url}")
-        print("Make sure the server is running and the URL is correct.")
+            # Test a query with disallowed keywords in a comment (should still be rejected)
+            print("\nTesting SQL validation with disallowed keywords in a comment (should fail)...")
+            try:
+                sneaky_query = """
+                SELECT 1 
+                -- INSERT INTO test_table VALUES (1)
+                """
+                await client.call_tool("execute_sql", {"sql_query": sneaky_query})
+                print("WARNING: Comment with disallowed keywords did not fail as expected!")
+
+            except ClientError as e:
+                print(f"Query with disallowed keywords in comment properly rejected: {e}")
+            except Exception as e:
+                print(f"An unexpected error occurred with the comment test: {e}")
+
     except Exception as e:
-        # Catch-all for other potential errors during client setup or connection
         print(f"An unexpected error occurred: {type(e).__name__}: {e}")
 
 
