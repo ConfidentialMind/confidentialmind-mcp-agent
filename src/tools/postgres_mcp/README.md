@@ -1,7 +1,5 @@
 # Postgres MCP Server (Read-Only)
 
-[![Powered by FastMCP](https://img.shields.io/badge/Powered%20by-FastMCP-blueviolet)](https://github.com/jlowin/fastmcp)
-
 A FastMCP server designed to provide **read-only** access to a PostgreSQL database. It allows MCP clients (like LLMs or other applications) to inspect database schemas and execute safe `SELECT` queries.
 
 ## Features
@@ -47,24 +45,59 @@ PG_PASSWORD=your_secure_password
 PG_DATABASE=mydatabase
 ```
 
+## Running the Server
+
+The server runs on port 8080 by default and uses SSE for communication.
+
+To start the server:
+
+```bash
+# From the project root
+python -m src.tools.postgres_mcp
+
+# Or if inside the src/tools/postgres_mcp directory
+python __main__.py
+```
+
+Once running, the server will be accessible at `http://localhost:8080/sse`.
+
 ## Testing
 
-The server includes integration tests located in `tests/mcp/postgres/test_server.py`. These tests verify the functionality of the exposed MCP resources and tools using `pytest`.
+You can test the server functionality using the provided test script in `tests/test_postgres_mcp.py`. This script connects to the MCP server and verifies all key functionality:
 
-### Test Requirements
-
-1. **Running PostgreSQL Instance:** The tests quire a running PostgreSQL database server accessible based on the connection settings (defaults to `localhost:5432`).
-2. **Test Database:** A database named `test_db` (or matching `PG_DATABASE`) must exist.
-3. **Permissions:** The database user (`postgres` or `PG_USER`) needs permissions to connect to the `test_db` database and `CREATE`/`DROP` tables within it. The tests create and tear down a table named `mcp_test_table`.
+1. Connection to the MCP server
+2. Listing available resources and tools
+3. Retrieving database schema information
+4. Executing read-only SQL queries
+5. Verifying security validation against write operations
 
 ### Running the Tests
 
-1. Ensure you have the development dependencies installed, including `pytest` and `pytest-asyncio`.
-2. Make sure your PostgreSQL server is running and configured as described above.
-3. Navigate to the root directory of the `confidentialmind-mcp-agent` project and run:
-
 ```bash
-PYTHONPATH=. uv run --frozen pytest tests/mcp/postgres/
+# Make sure the server is running first
+python -m src.tools.postgres_mcp
+
+# Then in another terminal, run the test script
+python tests/test_postgres_mcp.py
 ```
 
-The tests use FastMCP's in-memory client (`fastmcp.Client`) to directly interact with the server instance, avoiding the need for network connections or subprocess management during the test execution itself, while still performing real database operations against the configured test database.
+## Security Considerations
+
+This server is designed only for **read-only** access to databases. The security measures include:
+
+1. **Query Validation:** Only queries starting with `SELECT`, `WITH`, or `EXPLAIN` are allowed.
+2. **Blacklisted Keywords:** Queries containing modification keywords like `INSERT`, `UPDATE`, `DELETE`, etc. are rejected.
+
+**Warning:** These measures provide basic protection but are not foolproof. For production use:
+
+- Connect using a database user with **read-only privileges**.
+- Consider using database-level statement timeouts.
+- Implement proper authentication and authorization at the application level.
+
+### Customization
+
+To modify server settings:
+
+- Change the port by editing the `run()` call in `__main__.py`: `mcp_server.run(transport="sse", port=your_port)`
+- Add additional tools by extending the `server.py` file with new `@mcp_server.tool()` decorated functions
+- Enhance schema resources by adding more resource endpoints with `@mcp_server.resource()`
