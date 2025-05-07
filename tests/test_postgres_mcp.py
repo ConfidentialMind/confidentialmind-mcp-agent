@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+import asyncpg
 from fastmcp import Client
 from fastmcp.exceptions import ClientError
 from mcp.types import TextContent, TextResourceContents
@@ -8,11 +9,93 @@ from mcp.types import TextContent, TextResourceContents
 from .logger import logger
 
 
+async def create_test_tables(dsn: str) -> None:
+    """Create test tables for MCP server testing."""
+    logger.info("Setting up test database...")
+
+    # Connect directly to the database
+    conn = await asyncpg.connect(dsn)
+
+    try:
+        # Check if tables already exist
+        table_count = await conn.fetchval("""
+            SELECT COUNT(*) 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+            AND table_name IN ('test_users', 'test_products');
+        """)
+
+        if table_count > 0:
+            logger.info("Test tables already exist, dropping them first...")
+            await conn.execute("DROP TABLE IF EXISTS test_users, test_products;")
+
+        # Create test_users table
+        await conn.execute("""
+            CREATE TABLE test_users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) NOT NULL,
+                email VARCHAR(100) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        # Insert sample data
+        await conn.execute("""
+            INSERT INTO test_users (username, email) VALUES 
+            ('user1', 'user1@example.com'),
+            ('user2', 'user2@example.com'),
+            ('user3', 'user3@example.com');
+        """)
+
+        # Create test_products table
+        await conn.execute("""
+            CREATE TABLE test_products (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                price DECIMAL(10, 2) NOT NULL,
+                description TEXT
+            );
+        """)
+
+        # Insert sample data
+        await conn.execute("""
+            INSERT INTO test_products (name, price, description) VALUES 
+            ('Product 1', 19.99, 'This is product 1'),
+            ('Product 2', 29.99, 'This is product 2'),
+            ('Product 3', 39.99, 'This is product 3');
+        """)
+
+        logger.info("Test tables created successfully")
+    finally:
+        await conn.close()
+
+
+async def cleanup_test_tables(dsn: str) -> None:
+    """Remove test tables after testing is complete."""
+    logger.info("Cleaning up test database...")
+
+    # Connect directly to the database
+    conn = await asyncpg.connect(dsn)
+
+    try:
+        # Drop test tables
+        await conn.execute("DROP TABLE IF EXISTS test_users, test_products;")
+        logger.info("Test tables removed successfully")
+    except Exception as e:
+        logger.error(f"Error cleaning up test tables: {e}")
+    finally:
+        await conn.close()
+
+
 async def run():
     """Test the Postgres MCP server using FastMCP Client."""
     server_url = "http://localhost:8080/sse"
+    database_dsn = "postgresql://postgres:postgres@localhost:5432/test_db"
 
     try:
+        # Create test tables before running tests
+        await create_test_tables(database_dsn)
+
         logger.info("Connecting to Postgres MCP server", url=server_url, client="FastMCP")
 
         # Create the FastMCP Client context manager. It handles connection and initialization.
@@ -181,7 +264,46 @@ async def run():
             except Exception as e:
                 logger.error("Error executing tables query", error=str(e))
 
-            # Try a query to test the regex validation
+            # Test a query against our test tables
+            logger.info("Testing query against test_users table")
+            try:
+                users_query = "SELECT * FROM test_users LIMIT 5"
+                users_result_content = await client.call_tool(
+                    "execute_sql", {"sql_query": users_query}
+                )
+
+                if users_result_content:
+                    content = users_result_content[0]
+                    if isinstance(content, TextContent) and hasattr(content, "text"):
+                        try:
+                            users_data = json.loads(content.text)
+                            if isinstance(users_data, list):
+                                logger.info("Found test users", count=len(users_data))
+                                for user in users_data:
+                                    logger.info("User", username=user.get("username", "unknown"))
+                            else:
+                                logger.warning(
+                                    "Test users query returned unexpected format", result=users_data
+                                )
+                        except json.JSONDecodeError:
+                            logger.error(
+                                "Error parsing test users JSON",
+                                content_preview=content.text[:100],
+                            )
+                    else:
+                        logger.warning(
+                            "Test users query executed but returned non-text content",
+                            content_type=type(content),
+                        )
+                else:
+                    logger.warning("Test users query executed but no content returned")
+
+            except ClientError as e:
+                logger.error("Tool call for test_users query failed", error=str(e))
+            except Exception as e:
+                logger.error("Error executing test_users query", error=str(e))
+
+            # Try a query with EXPLAIN
             logger.info("Testing SQL query validation with EXPLAIN")
             try:
                 explain_query = """
@@ -213,7 +335,9 @@ async def run():
             # Test read-only validation by attempting to execute a write query
             logger.info("Testing read-only validation with a write query (should fail)")
             try:
-                write_query = "INSERT INTO test_table (id) VALUES (1)"
+                write_query = (
+                    "INSERT INTO test_users (username, email) VALUES ('test', 'test@example.com')"
+                )
                 await client.call_tool("execute_sql", {"sql_query": write_query})
                 logger.warning("Write query did not fail as expected!")
 
@@ -246,6 +370,12 @@ async def run():
 
     except Exception as e:
         logger.critical("An unexpected error occurred", error_type=type(e).__name__, error=str(e))
+    finally:
+        # Always clean up test tables, even if tests fail
+        try:
+            await cleanup_test_tables(database_dsn)
+        except Exception as e:
+            logger.error(f"Failed to clean up test tables: {e}")
 
 
 if __name__ == "__main__":
