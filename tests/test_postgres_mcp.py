@@ -5,46 +5,48 @@ from fastmcp import Client
 from fastmcp.exceptions import ClientError
 from mcp.types import TextContent, TextResourceContents
 
+from .logger import logger
+
 
 async def run():
     """Test the Postgres MCP server using FastMCP Client."""
     server_url = "http://localhost:8080/sse"
 
     try:
-        print(f"Connecting to Postgres MCP server at {server_url} using FastMCP...")
+        logger.info("Connecting to Postgres MCP server", url=server_url, client="FastMCP")
 
         # Create the FastMCP Client context manager. It handles connection and initialization.
         async with Client(server_url) as client:
-            print("Connection established and initialized with FastMCP Client!")
+            logger.info("Connection established and initialized with FastMCP Client")
 
             # List available prompts
             prompts_result = await client.list_prompts_mcp()
-            print(f"Available prompts: {[p.name for p in prompts_result.prompts]}")
+            logger.info("Available prompts", prompts=[p.name for p in prompts_result.prompts])
 
             # List available tools
             tools_response = await client.list_tools()
-            print(f"Available tools: {[tool.name for tool in tools_response]}")
+            logger.info("Available tools", tools=[tool.name for tool in tools_response])
 
             # Check if the expected tool is available
             has_execute_sql = any(tool.name == "execute_sql" for tool in tools_response)
             if not has_execute_sql:
-                print("\nERROR: 'execute_sql' tool is not available on the server")
+                logger.error("'execute_sql' tool is not available on the server")
                 return
 
             # List available resources
             resources_response = await client.list_resources()
-            print(f"Available resources: {[r.uri for r in resources_response]}")
+            logger.info("Available resources", resources=[r.uri for r in resources_response])
 
             # Check if our expected resource is available
             expected_resource = "postgres://schemas"
             available_resources_uris = [str(r.uri) for r in resources_response]
 
             if expected_resource not in available_resources_uris:
-                print(f"\nERROR: '{expected_resource}' resource is not available on the server")
+                logger.error("Expected resource not available", resource=expected_resource)
                 return
 
             # Test accessing the schemas resource
-            print(f"\nTesting access to '{expected_resource}' resource...")
+            logger.info("Testing access to resource", resource=expected_resource)
             try:
                 schema_response_contents = await client.read_resource(expected_resource)
 
@@ -56,27 +58,38 @@ async def run():
                     ):
                         try:
                             schemas_data = json.loads(content_item.text)
-                            print(f"Successfully retrieved schemas for {len(schemas_data)} tables")
-                            # Print first few tables
+                            logger.info(
+                                "Successfully retrieved schemas", table_count=len(schemas_data)
+                            )
+                            # Log first few tables
                             for i, (table_key, columns) in enumerate(schemas_data.items()):
-                                print(f"  - {table_key} ({len(columns)} columns)")
+                                logger.info(
+                                    "Table schema", table=table_key, column_count=len(columns)
+                                )
                                 if i >= 2 and len(schemas_data) > 3:
-                                    print(f"  ... and {len(schemas_data) - 3} more tables")
+                                    logger.info(
+                                        "Additional tables not shown",
+                                        remaining_count=len(schemas_data) - 3,
+                                    )
                                     break
                         except json.JSONDecodeError:
-                            print(f"Error parsing schemas JSON: {content_item.text[:100]}...")
+                            logger.error(
+                                "Error parsing schemas JSON",
+                                content_preview=content_item.text[:100],
+                            )
                     else:
-                        print(
-                            f"Received non-text or unexpected content for schemas: {type(content_item)}"
+                        logger.error(
+                            "Received non-text or unexpected content for schemas",
+                            content_type=type(content_item),
                         )
                 else:
-                    print("Schemas resource returned no content.")
+                    logger.warning("Schemas resource returned no content")
 
             except Exception as e:
-                print(f"Error accessing schemas resource: {e}")
+                logger.error("Error accessing schemas resource", error=str(e))
 
             # Test executing a SQL query for PostgreSQL version
-            print("\nTesting 'execute_sql' tool with version query...")
+            logger.info("Testing 'execute_sql' tool with version query")
             try:
                 query_result_content = await client.call_tool(
                     "execute_sql", {"sql_query": "SELECT version() AS version"}
@@ -88,25 +101,32 @@ async def run():
                         try:
                             version_data = json.loads(content.text)
                             if isinstance(version_data, list) and len(version_data) > 0:
-                                print(
-                                    f"Query executed successfully: {version_data[0].get('version', 'Unknown')}"
+                                logger.info(
+                                    "Query executed successfully",
+                                    version=version_data[0].get("version", "Unknown"),
                                 )
                             else:
-                                print(f"Query executed successfully: {version_data}")
+                                logger.info("Query executed successfully", result=version_data)
                         except json.JSONDecodeError:
-                            print(f"Error parsing query result JSON: {content.text[:100]}...")
+                            logger.error(
+                                "Error parsing query result JSON",
+                                content_preview=content.text[:100],
+                            )
                     else:
-                        print(f"Query executed but returned non-text content: {type(content)}")
+                        logger.warning(
+                            "Query executed but returned non-text content",
+                            content_type=type(content),
+                        )
                 else:
-                    print("Query executed but no content returned")
+                    logger.warning("Query executed but no content returned")
 
             except ClientError as e:
-                print(f"Tool call 'execute_sql' (version) failed: {e}")
+                logger.error("Tool call 'execute_sql' (version) failed", error=str(e))
             except Exception as e:
-                print(f"Error executing SQL version query: {e}")
+                logger.error("Error executing SQL version query", error=str(e))
 
             # Try a query to list tables in the database
-            print("\nTesting 'execute_sql' tool with tables query...")
+            logger.info("Testing 'execute_sql' tool with tables query")
             try:
                 tables_query = """
                 SELECT
@@ -132,31 +152,37 @@ async def run():
                         try:
                             tables_data = json.loads(content.text)
                             if isinstance(tables_data, list):
-                                print(f"Found {len(tables_data)} tables:")
+                                logger.info("Found tables", count=len(tables_data))
                                 for i, table in enumerate(tables_data):
                                     schema = table.get("table_schema", "unknown")
                                     name = table.get("table_name", "unknown")
-                                    print(f"  - {schema}.{name}")
+                                    logger.info("Table", schema=schema, name=name)
                                     if i >= 9:  # Limit output display
                                         break
                             else:
-                                print(f"Tables query returned unexpected format: {tables_data}")
+                                logger.warning(
+                                    "Tables query returned unexpected format", result=tables_data
+                                )
                         except json.JSONDecodeError:
-                            print(f"Error parsing tables result JSON: {content.text[:100]}...")
+                            logger.error(
+                                "Error parsing tables result JSON",
+                                content_preview=content.text[:100],
+                            )
                     else:
-                        print(
-                            f"Tables query executed but returned non-text content: {type(content)}"
+                        logger.warning(
+                            "Tables query executed but returned non-text content",
+                            content_type=type(content),
                         )
                 else:
-                    print("Tables query executed but no content returned")
+                    logger.warning("Tables query executed but no content returned")
 
             except ClientError as e:
-                print(f"Tool call 'execute_sql' (tables) failed: {e}")
+                logger.error("Tool call 'execute_sql' (tables) failed", error=str(e))
             except Exception as e:
-                print(f"Error executing tables query: {e}")
+                logger.error("Error executing tables query", error=str(e))
 
             # Try a query to test the regex validation
-            print("\nTesting SQL query validation with EXPLAIN...")
+            logger.info("Testing SQL query validation with EXPLAIN")
             try:
                 explain_query = """
                 EXPLAIN (FORMAT JSON)
@@ -175,45 +201,51 @@ async def run():
                 )
 
                 if explain_result_content and isinstance(explain_result_content[0], TextContent):
-                    print("EXPLAIN query executed successfully")
+                    logger.info("EXPLAIN query executed successfully")
                 else:
-                    print("EXPLAIN query returned unexpected or no content")
+                    logger.warning("EXPLAIN query returned unexpected or no content")
 
             except ClientError as e:
-                print(f"Tool call 'execute_sql' (EXPLAIN) failed: {e}")
+                logger.error("Tool call 'execute_sql' (EXPLAIN) failed", error=str(e))
             except Exception as e:
-                print(f"Error executing EXPLAIN query: {e}")
+                logger.error("Error executing EXPLAIN query", error=str(e))
 
             # Test read-only validation by attempting to execute a write query
-            print("\nTesting read-only validation with a write query (should fail)...")
+            logger.info("Testing read-only validation with a write query (should fail)")
             try:
                 write_query = "INSERT INTO test_table (id) VALUES (1)"
                 await client.call_tool("execute_sql", {"sql_query": write_query})
-                print("WARNING: Write query did not fail as expected!")
+                logger.warning("Write query did not fail as expected!")
 
             except ClientError as e:
-                print(f"Write query properly rejected by tool: {e}")
-                print("Read-only validation working correctly on server-side.")
+                logger.info("Write query properly rejected by tool", error=str(e))
+                logger.info("Read-only validation working correctly on server-side")
             except Exception as e:
-                print(f"An unexpected error occurred during the write query attempt: {e}")
+                logger.error(
+                    "An unexpected error occurred during the write query attempt", error=str(e)
+                )
 
             # Test a query with disallowed keywords in a comment (should still be rejected)
-            print("\nTesting SQL validation with disallowed keywords in a comment (should fail)...")
+            logger.info(
+                "Testing SQL validation with disallowed keywords in a comment (should fail)"
+            )
             try:
                 sneaky_query = """
                 SELECT 1 
                 -- INSERT INTO test_table VALUES (1)
                 """
                 await client.call_tool("execute_sql", {"sql_query": sneaky_query})
-                print("WARNING: Comment with disallowed keywords did not fail as expected!")
+                logger.warning("Comment with disallowed keywords did not fail as expected!")
 
             except ClientError as e:
-                print(f"Query with disallowed keywords in comment properly rejected: {e}")
+                logger.info(
+                    "Query with disallowed keywords in comment properly rejected", error=str(e)
+                )
             except Exception as e:
-                print(f"An unexpected error occurred with the comment test: {e}")
+                logger.error("An unexpected error occurred with the comment test", error=str(e))
 
     except Exception as e:
-        print(f"An unexpected error occurred: {type(e).__name__}: {e}")
+        logger.critical("An unexpected error occurred", error_type=type(e).__name__, error=str(e))
 
 
 if __name__ == "__main__":
