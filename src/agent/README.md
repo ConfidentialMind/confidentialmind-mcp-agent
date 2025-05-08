@@ -1,141 +1,153 @@
 # FastMCP Agent
 
-A standalone FastMCP client application that interacts with MCP servers to execute complex workflows. This agent maintains the same workflow states as the original LangGraph implementation but is built on the cleaner, more Pythonic FastMCP client architecture.
+A standalone FastMCP client application that interacts with MCP servers to execute complex workflows. This agent includes both a CLI tool and an OpenAI API-compatible endpoint.
 
 ## Features
 
-- Workflow states: initialize context, parse query, execute MCP actions, evaluate results, replan actions, generate response
-- FastMCP client that connects to MCP servers via SSE transport
-- PostgreSQL database for session management
-- Confidentialmind SDK integration for LLM connections
-- Clean separation of concerns with modular design
-- Robust error handling and replanning capabilities
-
-## Architecture
-
-```
-fastmcp_agent/
-├── __init__.py           # Package exports
-├── state.py              # Pydantic models for agent state
-├── database.py           # PostgreSQL connection management
-├── llm.py                # LLM connector using confidentialmind SDK
-├── agent.py              # Core agent implementation
-└── main.py               # Command-line entry point
-```
+- **Flexible Deployment**: Run as a CLI tool or as an API server
+- **OpenAI Compatibility**: API endpoint compatible with OpenAI's chat completion format
+- **Workflow States**: Initialize context, parse query, execute MCP actions, evaluate results, replan actions, generate response
+- **FastMCP Client**: Connects to MCP servers via SSE transport
+- **PostgreSQL Database**: For session management and conversation history
+- **Confidentialmind SDK Integration**: For LLM connections
+- **Clean Architecture**: Separation of concerns with modular design
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/fastmcp-agent.git
-cd fastmcp-agent
+git clone git@github.com:ConfidentialMind/confidentialmind-mcp-agent.git
 
-# Install the package in development mode
-pip install -e .
+# Navigate to project root
+cd confidentialmind-mcp-agent
+
+# Install uv (https://docs.astral.sh/uv/getting-started/installation/)
+## MacOS:
+brew install uv
+
+## or
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create virtual environment
+uv venv --python 3.10
+
+# Activate the virtual environment
+source .venv/bin/activate
+
+# Install dependencies
+uv pip install -e .
 ```
 
 ## Configuration
 
-The agent can be configured through environment variables, command-line arguments, or a configuration file.
-
 ### Environment Variables
 
-- `AGENT_TOOLS_URL`: URL of the MCP server (default: http://localhost:8000/sse)
-- `DATABASE_URL`: PostgreSQL connection string (optional, falls back to config manager)
-- `LLM_URL`: LLM service URL (optional, falls back to config manager)
+- `AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8000/sse>)
+- `MCP_SERVER_*`: Additional MCP servers in the format MCP_SERVER_NAME=url
+- `DB_CONFIG_ID`: Database connector config ID (default: DATABASE)
+- `LLM_CONFIG_ID`: LLM service config ID (default: LLM)
 
-### Command-line Arguments
+### Config File
 
-```bash
-python -m fastmcp_agent.main "What tools are available?" --session my-session-id --db DATABASE --llm LLM --config config.json --debug
-```
-
-- `query`: The user query to process
-- `--session`: Session ID to use (optional, generates a UUID if not provided)
-- `--db`: Database config ID for confidentialmind SDK (default: DATABASE)
-- `--llm`: LLM config ID for confidentialmind SDK (default: LLM)
-- `--config`: Path to a JSON configuration file (optional)
-- `--debug`: Enable debug logging
-
-### Configuration File (JSON)
+You can also provide a JSON configuration file with:
 
 ```json
 {
   "mcp_servers": {
     "agentTools": "http://tools-server:8000/sse",
     "dataService": "http://data-server:8001/sse"
-  },
-  "database": {
-    "host": "localhost",
-    "port": 5432,
-    "user": "postgres",
-    "password": "postgres",
-    "database": "agent_sessions"
   }
 }
 ```
 
 ## Usage
 
-### As a Command-line Tool
+### CLI Mode
 
 ```bash
-# Simple query
-python -m fastmcp_agent.main "What's in the database?"
+# Basic usage
+python -m agent.main "What tools are available?"
 
-# Continue conversation with a session ID
-python -m fastmcp_agent.main "Tell me more about table users" --session abc123
+# With session ID
+python -m agent.main "Tell me more about table users" --session abc123
 
-# Debugging
-python -m fastmcp_agent.main "Why did the previous action fail?" --debug
+# With debug logging
+python -m agent.main "Why did the previous action fail?" --debug
+
+# With custom config file
+python -m agent.main "Query the database" --config config.json
 ```
 
-### As a Python Library
+### API Server Mode
 
-```python
-import asyncio
-from fastmcp_agent import Agent, Database, DatabaseSettings, LLMConnector
+```bash
+# Start the API server
+python -m agent.main --api
 
-async def run_agent():
-    # Initialize components
-    db_settings = DatabaseSettings()
-    database = Database(db_settings)
-    await database.connect()
+# Configure host and port
+python -m agent.main --api --host 127.0.0.1 --port 3000
 
-    llm = LLMConnector(config_id="LLM")
-    await llm.initialize()
+# With debug logging
+python -m agent.main --api --debug
+```
 
-    # Create agent with MCP servers
-    mcp_servers = {
-        "agentTools": "http://localhost:8000/sse",
-        "dataService": "http://localhost:8001/sse"
+## API Endpoints
+
+### Chat Completions Endpoint
+
+```
+POST /v1/chat/completions
+```
+
+Request format:
+
+```json
+{
+  "model": "cm-llm",
+  "messages": [{ "role": "user", "content": "What tools are available?" }]
+}
+```
+
+Response format:
+
+```json
+{
+  "id": "chatcmpl-123456",
+  "object": "chat.completion",
+  "created": 1692372149,
+  "model": "gpt-3.5-turbo",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The available tools are..."
+      },
+      "finish_reason": "stop"
     }
-
-    agent = Agent(database, llm, mcp_servers)
-    await agent.initialize()
-
-    # Use context manager to ensure proper cleanup
-    async with agent:
-        # Run query
-        state = await agent.run("What tools are available?")
-
-        # Access results
-        print(f"Response: {state.response}")
-
-    # Cleanup
-    await database.disconnect()
-    await llm.close()
-
-# Run the async function
-asyncio.run(run_agent())
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 20,
+    "total_tokens": 30
+  }
+}
 ```
 
-## Special Commands
+### Health Check
 
-The agent recognizes some special commands:
+```
+GET /health
+```
 
-- `clear history`: Clears the conversation history for the current session
-- `show history`: Displays the conversation history for the current session
+## Session Management
+
+Session IDs can be provided in one of these ways:
+
+1. In the CLI using the `--session` argument
+2. In the API via the `X-Session-ID` header
+3. Via a `session_id` cookie in the API
+4. Automatically generated if not provided
 
 ## Development
 
@@ -154,8 +166,4 @@ pytest tests/
 
 ### Debugging
 
-Enable debug logging with the `--debug` flag to see detailed logs of each workflow step, including agent thoughts and LLM interactions.
-
-## License
-
-[MIT License](LICENSE)
+Enable debug logging with the `--debug` flag in either CLI or API mode.

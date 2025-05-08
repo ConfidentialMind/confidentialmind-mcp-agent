@@ -8,7 +8,7 @@ import backoff
 from confidentialmind_core.config_manager import get_api_parameters
 from pydantic_settings import BaseSettings
 
-from .state import Message
+from src.agent.state import Message
 
 # Configure logging
 logger = logging.getLogger(__name__)

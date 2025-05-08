@@ -10,9 +10,9 @@ from fastmcp import Client
 from fastmcp.client.transports import SSETransport
 from fastmcp.exceptions import ClientError
 
-from .database import Database
-from .llm import LLMConnector
-from .state import AgentState, Message
+from src.agent.database import Database
+from src.agent.llm import LLMConnector
+from src.agent.state import AgentState, Message
 
 logger = logging.getLogger(__name__)
 
