@@ -313,8 +313,97 @@ class Database:
                 )
                 logger.info("Created conversation_messages table and indices")
                 return True
+            else:  # validate table structure
+                expected_columns = {
+                    "id": {"data_type": "integer", "is_nullable": "NO"},
+                    "session_id": {"data_type": "text", "is_nullable": "NO"},
+                    "message_order": {"data_type": "integer", "is_nullable": "NO"},
+                    "role": {"data_type": "text", "is_nullable": "NO"},
+                    "content": {"data_type": "text", "is_nullable": "NO"},
+                    "timestamp": {"data_type": "timestamp with time zone", "is_nullable": "NO"},
+                }
 
-            return True
+                # Get actual columns
+                columns = await self.execute_query(
+                    """
+                    SELECT column_name, data_type, is_nullable
+                    FROM information_schema.columns
+                    WHERE table_name = 'conversation_messages'
+                    """,
+                    fetch_type="all",
+                )
+
+                actual_columns = {
+                    col["column_name"]: {
+                        "data_type": col["data_type"],
+                        "is_nullable": col["is_nullable"],
+                    }
+                    for col in columns
+                }
+
+                # Check for missing columns
+                missing_columns = set(expected_columns.keys()) - set(actual_columns.keys())
+                if missing_columns:
+                    logger.error(
+                        f"Missing columns in conversation_messages table: {missing_columns}"
+                    )
+                    return False
+
+                # Check for columns with wrong type or nullability
+                for col_name, expected_props in expected_columns.items():
+                    if col_name in actual_columns:
+                        actual_props = actual_columns[col_name]
+                        if (
+                            expected_props["data_type"] != actual_props["data_type"]
+                            or expected_props["is_nullable"] != actual_props["is_nullable"]
+                        ):
+                            logger.error(
+                                f"Column {col_name} has incorrect properties. Expected: {expected_props}, Actual: {actual_props}"
+                            )
+                            return False
+
+                # Check for indices
+                expected_indices = [
+                    "idx_conversation_messages_session_id",
+                    "idx_conversation_messages_order",
+                ]
+
+                indices = await self.execute_query(
+                    """
+                    SELECT indexname
+                    FROM pg_indexes
+                    WHERE tablename = 'conversation_messages'
+                    """,
+                    fetch_type="all",
+                )
+
+                actual_indices = [idx["indexname"] for idx in indices]
+                missing_indices = set(expected_indices) - set(actual_indices)
+
+                if missing_indices:
+                    # Create missing indices
+                    for idx in missing_indices:
+                        if idx == "idx_conversation_messages_session_id":
+                            await self.execute_query(
+                                """
+                                CREATE INDEX IF NOT EXISTS idx_conversation_messages_session_id 
+                                ON conversation_messages(session_id)
+                                """,
+                                fetch_type="none",
+                            )
+                        elif idx == "idx_conversation_messages_order":
+                            await self.execute_query(
+                                """
+                                CREATE INDEX IF NOT EXISTS idx_conversation_messages_order 
+                                ON conversation_messages(session_id, message_order)
+                                """,
+                                fetch_type="none",
+                            )
+                    logger.info(f"Created missing indices: {missing_indices}")
+
+                logger.info("Validated conversation_messages table structure")
+                return True
+
         except Exception as e:
             logger.error(f"Error ensuring schema: {e}")
             return False

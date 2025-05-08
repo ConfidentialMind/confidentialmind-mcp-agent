@@ -42,4 +42,4 @@ structlog.configure(
 )
 
 # Create and export a logger for the tests
-logger = structlog.get_logger("postgres_mcp_tests")
+logger = structlog.get_logger("tests")
