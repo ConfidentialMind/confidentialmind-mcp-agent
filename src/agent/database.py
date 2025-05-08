@@ -1,12 +1,14 @@
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 import backoff
 from confidentialmind_core.config_manager import get_api_parameters
 from pydantic_settings import BaseSettings
+
+from .state import Message
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -23,7 +25,7 @@ def get_backoff_config() -> Dict[str, Any]:
     }
 
 
-class AgentPostgresSettings(BaseSettings):
+class DatabaseSettings(BaseSettings):
     """Settings for PostgreSQL connection used by the agent for session management"""
 
     # Default connection settings
@@ -82,10 +84,10 @@ class AgentPostgresSettings(BaseSettings):
             return "postgresql://user:****@host:port/database"
 
 
-class AgentDatabase:
+class Database:
     """Database connection management for agent session history storage"""
 
-    def __init__(self, settings: AgentPostgresSettings):
+    def __init__(self, settings: DatabaseSettings):
         """Initialize with database settings"""
         self.settings = settings
         self._pool: Optional[asyncpg.pool.Pool] = None
@@ -155,11 +157,13 @@ class AgentDatabase:
             self._pool = None
             logger.info("Successfully disconnected database connections")
 
-    def pool(self) -> asyncpg.pool.Pool:
-        """Get connection pool or raise error if not initialized"""
-        if self._pool is None:
-            raise ValueError("Connection pool is not initialized.")
-        return self._pool
+    def is_connected(self) -> bool:
+        """Check if database is currently connected"""
+        return self._pool is not None and not self._connection_error
+
+    def last_error(self) -> Optional[str]:
+        """Get the last recorded connection error."""
+        return self._connection_error
 
     def _schedule_reconnect(self):
         """Schedule a reconnection attempt with exponential backoff"""
@@ -170,14 +174,6 @@ class AgentDatabase:
     async def _reconnect_with_backoff(self):
         """Attempt to reconnect with exponential backoff"""
         await self.connect(self._current_db_url)
-
-    def is_connected(self) -> bool:
-        """Check if database is currently connected"""
-        return self._pool is not None and not self._connection_error
-
-    def last_error(self) -> Optional[str]:
-        """Get the last recorded connection error."""
-        return self._connection_error
 
     async def ensure_connected(self):
         """Ensure database is connected, waiting for reconnection if necessary"""
@@ -215,8 +211,116 @@ class AgentDatabase:
                 logger.error(f"Error executing query: {e}")
                 raise
 
+    # Session history methods
 
-async def fetch_agent_db_url(config_id: str) -> Optional[str]:
+    async def load_history(self, session_id: str) -> List[Message]:
+        """Load conversation history from the database for a session."""
+        try:
+            await self.ensure_connected()
+            results = await self.execute_query(
+                """
+                SELECT role, content
+                FROM conversation_messages
+                WHERE session_id = $1
+                ORDER BY message_order
+                """,
+                session_id,
+            )
+            messages = [Message(role=row["role"], content=row["content"]) for row in results]
+            logger.debug(f"Loaded {len(messages)} messages for session {session_id}")
+            return messages
+        except Exception as e:
+            logger.error(f"Error loading history for session {session_id}: {e}")
+            return []
+
+    async def save_message(self, session_id: str, message: Message) -> bool:
+        """Save a message to the database for a session."""
+        try:
+            await self.ensure_connected()
+            max_order = await self.execute_query(
+                "SELECT MAX(message_order) FROM conversation_messages WHERE session_id = $1",
+                session_id,
+                fetch_type="val",
+            )
+            message_order = 0 if max_order is None else max_order + 1
+            await self.execute_query(
+                """
+                INSERT INTO conversation_messages
+                (session_id, message_order, role, content, timestamp)
+                VALUES ($1, $2, $3, $4, NOW())
+                """,
+                session_id,
+                message_order,
+                message.role,
+                message.content,
+                fetch_type="none",
+            )
+            logger.debug(f"Saved message for session {session_id} order {message_order}")
+            return True
+        except Exception as e:
+            if not self.is_connected():
+                logger.warning(f"DB not connected saving msg for {session_id}: {self.last_error()}")
+            else:
+                logger.error(f"Error saving message for session {session_id}: {e}")
+            return False
+
+    async def clear_history(self, session_id: str) -> bool:
+        """Clear the conversation history for a session in the database."""
+        try:
+            await self.ensure_connected()
+            await self.execute_query(
+                "DELETE FROM conversation_messages WHERE session_id = $1",
+                session_id,
+                fetch_type="none",
+            )
+            logger.info(f"Cleared conversation history for session {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing history for session {session_id}: {e}")
+            return False
+
+    async def ensure_schema(self) -> bool:
+        """Ensure necessary database tables exist"""
+        try:
+            await self.ensure_connected()
+
+            # Check if table exists
+            table_exists = await self.execute_query(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'conversation_messages')",
+                fetch_type="val",
+            )
+
+            if not table_exists:
+                # Create the table if it doesn't exist
+                await self.execute_query(
+                    """
+                    CREATE TABLE IF NOT EXISTS conversation_messages (
+                        id SERIAL PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        message_order INTEGER NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    
+                    CREATE INDEX IF NOT EXISTS idx_conversation_messages_session_id 
+                    ON conversation_messages(session_id);
+                    
+                    CREATE INDEX IF NOT EXISTS idx_conversation_messages_order 
+                    ON conversation_messages(session_id, message_order);
+                    """,
+                    fetch_type="none",
+                )
+                logger.info("Created conversation_messages table and indices")
+                return True
+
+            return True
+        except Exception as e:
+            logger.error(f"Error ensuring schema: {e}")
+            return False
+
+
+async def fetch_db_url(config_id: str) -> Optional[str]:
     """
     Try to fetch the database URL from the connector until available.
 

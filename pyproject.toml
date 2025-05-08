@@ -5,6 +5,7 @@ description = "CM Agent"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "aiohttp>=3.11.18",
   "asyncpg>=0.30.0",
   "backoff>=2.2.1",
   "black>=25.1.0",
@@ -25,6 +26,7 @@ dependencies = [
   "requests>=2.32.3",
   "ruff>=0.11.2",
   "sqlalchemy>=2.0.40",
+  "structlog>=25.3.0",
   "uvicorn>=0.34.0",
 ]
 
