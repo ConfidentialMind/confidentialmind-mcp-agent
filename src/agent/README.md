@@ -1,16 +1,24 @@
 # FastMCP Agent
 
-A standalone FastMCP client application that interacts with MCP servers to execute complex workflows. This agent includes both a CLI tool and an OpenAI API-compatible endpoint.
+A flexible FastMCP client application that interacts with MCP servers to execute complex workflows using either CLI or API mode. The agent supports configurable transport options (stdio/SSE) and includes an OpenAI API-compatible endpoint.
 
 ## Features
 
-- **Flexible Deployment**: Run as a CLI tool or as an API server
-- **OpenAI Compatibility**: API endpoint compatible with OpenAI's chat completion format
-- **Workflow States**: Initialize context, parse query, execute MCP actions, evaluate results, replan actions, generate response
-- **FastMCP Client**: Connects to MCP servers via SSE transport
-- **PostgreSQL Database**: For session management and conversation history
-- **Confidentialmind SDK Integration**: For LLM connections
-- **Clean Architecture**: Separation of concerns with modular design
+- **Dual-Mode Operation**:
+  - **CLI Mode**: Run as a command-line tool using stdio transport for local development
+  - **API Mode**: Run as a standalone server with an OpenAI-compatible API endpoint using SSE transport
+- **Flexible Transport Configuration**:
+  - Support for multiple MCP servers via configurable transports
+  - Dynamic transport selection based on runtime mode
+- **Robust Database Integration**:
+  - Automatic schema validation and creation
+  - PostgreSQL-based session management
+- **Intelligent Agent Workflow**:
+  - Multi-stage processing: initialize context, parse query, execute MCP actions, evaluate results, replan actions, generate response
+  - Handles action failures with automatic replanning
+- **OpenAI Compatibility**:
+  - Drop-in replacement for OpenAI's chat completions API
+  - Session management via headers
 
 ## Installation
 
@@ -42,20 +50,29 @@ uv pip install -e .
 
 ### Environment Variables
 
-- `AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8000/sse>)
+- `AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/sse>)
 - `MCP_SERVER_*`: Additional MCP servers in the format MCP_SERVER_NAME=url
 - `DB_CONFIG_ID`: Database connector config ID (default: DATABASE)
 - `LLM_CONFIG_ID`: LLM service config ID (default: LLM)
 
 ### Config File
 
-You can also provide a JSON configuration file with:
+You can provide a JSON configuration file with server definitions:
 
 ```json
 {
   "mcp_servers": {
-    "agentTools": "http://tools-server:8000/sse",
-    "dataService": "http://data-server:8001/sse"
+    "agentTools": "server.py" // For CLI mode (path to script)
+  }
+}
+```
+
+Or for API mode:
+
+```json
+{
+  "mcp_servers": {
+    "agentTools": "http://tools-server:8080/sse" // For API mode (SSE URL)
   }
 }
 ```
@@ -89,6 +106,9 @@ python -m agent.main --api --host 127.0.0.1 --port 3000
 
 # With debug logging
 python -m agent.main --api --debug
+
+# With custom config file
+python -m agent.main --api --config api_config.json
 ```
 
 ## API Endpoints
@@ -115,7 +135,7 @@ Response format:
   "id": "chatcmpl-123456",
   "object": "chat.completion",
   "created": 1692372149,
-  "model": "gpt-3.5-turbo",
+  "model": "cm-llm",
   "choices": [
     {
       "index": 0,
@@ -140,6 +160,15 @@ Response format:
 GET /health
 ```
 
+Response:
+
+```json
+{
+  "status": "healthy",
+  "database": true
+}
+```
+
 ## Session Management
 
 Session IDs can be provided in one of these ways:
@@ -148,6 +177,30 @@ Session IDs can be provided in one of these ways:
 2. In the API via the `X-Session-ID` header
 3. Via a `session_id` cookie in the API
 4. Automatically generated if not provided
+
+## Connecting MCP Servers
+
+### PostgreSQL MCP Server
+
+The agent can connect to the included PostgreSQL MCP server for database access:
+
+```bash
+# Start the PostgreSQL MCP server
+python -m src.tools.postgres_mcp
+
+# Then start the agent in API mode, configuring the PostgreSQL server
+python -m agent.main --api --config postgres_config.json
+```
+
+Example `postgres_config.json`:
+
+```json
+{
+  "mcp_servers": {
+    "postgres": "http://localhost:8080/sse"
+  }
+}
+```
 
 ## Development
 
@@ -158,12 +211,25 @@ Session IDs can be provided in one of these ways:
 - FastMCP-compatible MCP servers
 - Access to confidentialmind SDK
 
+### Architecture
+
+The agent uses a modular architecture with these key components:
+
+- **TransportManager**: Handles transport configuration and client management
+- **Agent**: Core workflow logic for executing MCP-based queries
+- **Database**: Session management and history storage
+- **LLMConnector**: Interface to language model services
+
 ### Running Tests
 
 ```bash
-pytest tests/
+# TODO
 ```
 
 ### Debugging
 
 Enable debug logging with the `--debug` flag in either CLI or API mode.
+
+## License
+
+Confidential Mind proprietary software.

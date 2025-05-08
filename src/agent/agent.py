@@ -13,18 +13,19 @@ from fastmcp.exceptions import ClientError
 from src.agent.database import Database
 from src.agent.llm import LLMConnector
 from src.agent.state import AgentState, Message
+from src.agent.transport import TransportManager
 
 logger = logging.getLogger(__name__)
 
 
 class Agent:
-    """FastMCP client-based agent implementation"""
+    """FastMCP client-based agent implementation with flexible transport support"""
 
     def __init__(
         self,
         database: Database,
         llm_connector: LLMConnector,
-        mcp_servers: Dict[str, str],
+        transport_manager: TransportManager,
         debug: bool = False,
     ):
         """
@@ -33,13 +34,12 @@ class Agent:
         Args:
             database: Database instance for session storage
             llm_connector: LLM connector for generating responses
-            mcp_servers: Dictionary mapping server IDs to URLs
+            transport_manager: Transport manager for MCP client configuration
             debug: Enable debug logging
         """
         self.db = database
         self.llm = llm_connector
-        self.mcp_servers = mcp_servers
-        self.mcp_clients: Dict[str, Client] = {}  # Will be populated during initialization
+        self.transport_manager = transport_manager
         self.debug = debug
         self.current_history: List[Message] = []
 
@@ -49,16 +49,16 @@ class Agent:
         self._exit_stack = AsyncExitStack()
 
     async def initialize(self) -> bool:
-        """Initialize agent components by creating MCP clients."""
-        logger.info("Initializing agent: creating MCP clients...")
+        """Initialize agent components."""
+        logger.info("Initializing agent...")
 
-        # Create clients for each MCP server
-        for server_id, server_url in self.mcp_servers.items():
-            transport = SSETransport(url=server_url)
-            client = Client(transport)
-            self.mcp_clients[server_id] = client
+        # Ensure all clients are created
+        self.transport_manager.create_all_clients()
 
-        logger.info(f"Created {len(self.mcp_clients)} MCP clients.")
+        # Log available clients
+        client_info = ", ".join([f"{k}" for k in self.transport_manager.get_all_clients().keys()])
+        logger.info(f"Initialized agent with MCP clients: {client_info}")
+
         return True
 
     async def __aenter__(self):
@@ -66,7 +66,7 @@ class Agent:
         await self._exit_stack.__aenter__()
 
         # Connect to all MCP clients
-        for server_id, client in self.mcp_clients.items():
+        for server_id, client in self.transport_manager.get_all_clients().items():
             try:
                 logger.debug(f"Connecting to MCP server: {server_id}")
                 await client.__aenter__()
@@ -93,11 +93,13 @@ class Agent:
             # Initialize containers in execution_context
             state.execution_context["available_tools"] = []
             state.execution_context["available_resources"] = []
-            state.execution_context["server_ids"] = list(self.mcp_clients.keys())
+            state.execution_context["server_ids"] = list(
+                self.transport_manager.get_all_clients().keys()
+            )
 
             # Discover tools and resources from each client concurrently
             tasks = {}
-            for server_id, client in self.mcp_clients.items():
+            for server_id, client in self.transport_manager.get_all_clients().items():
                 tasks[server_id] = asyncio.gather(
                     client.list_tools(),
                     client.list_resources(),
@@ -318,14 +320,15 @@ class Agent:
             return state
 
         # Get the MCP client
-        if server_id not in self.mcp_clients:
+        # if server_id not in self.mcp_clients:
+        if not self.transport_manager.get_client(server_id):
             error_msg = f"MCP client for '{server_id}' not available"
             state.mcp_results[action_key] = {"error": error_msg}
             state.current_action_index += 1
             state.error = error_msg
             return state
 
-        client = self.mcp_clients[server_id]
+        client = self.transport_manager.get_client(server_id)
         action_label = f"{server_id}.{mcp_method}({json.dumps(params, default=str)})"
         logger.info(
             f"Executing action {state.current_action_index + 1}/{len(state.planned_actions)}: {action_label}"

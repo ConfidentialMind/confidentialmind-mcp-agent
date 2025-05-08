@@ -1,9 +1,12 @@
+# src/agent/__init__.py
+
 """FastMCP client-based agent for interacting with MCP servers."""
 
 from src.agent.agent import Agent
 from src.agent.database import Database, DatabaseSettings, fetch_db_url
 from src.agent.llm import LLMConnector
 from src.agent.state import AgentState, Message
+from src.agent.transport import TransportManager
 
 # Make API components accessible when installed
 try:
@@ -21,6 +24,7 @@ __all__ = [
     "LLMConnector",
     "AgentState",
     "Message",
+    "TransportManager",
 ]
 
 # Export API components if available

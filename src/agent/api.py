@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
 import uvicorn
+from confidentialmind_core.config_manager import load_environment
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -15,9 +16,12 @@ from pydantic import BaseModel, Field
 from src.agent.agent import Agent
 from src.agent.database import Database, DatabaseSettings, fetch_db_url
 from src.agent.llm import LLMConnector
+from src.agent.transport import TransportManager
 
 # Configure logging
 logger = logging.getLogger("fastmcp_agent.api")
+
+load_environment()
 
 
 # Define Pydantic models for OpenAI API compatibility
@@ -68,6 +72,7 @@ class AgentComponents:
     def __init__(self):
         self.database: Optional[Database] = None
         self.llm_connector: Optional[LLMConnector] = None
+        self.transport_manager: Optional[TransportManager] = None
         self.mcp_servers: Dict[str, str] = {}
         self.exit_stack = AsyncExitStack()
         self.initialized = False
@@ -75,7 +80,7 @@ class AgentComponents:
         self.llm_config_id = os.environ.get("LLM_CONFIG_ID", "LLM")
 
         # Get MCP server URLs from environment with a default
-        default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8000/sse")
+        default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/sse")
         self.mcp_servers = {"agentTools": default_mcp_server}
 
         # Check if there are any additional MCP servers specified in the format MCP_SERVER_NAME=url
@@ -113,7 +118,24 @@ class AgentComponents:
                 return False
 
             self.initialized = True
+
+            # Initialize transport manager for API mode
+            self.transport_manager = TransportManager(mode="api")
+
+            # Configure transports
+            for server_id, server_url in self.mcp_servers.items():
+                try:
+                    self.transport_manager.configure_transport(server_id, server_url=server_url)
+                except Exception as e:
+                    logger.error(f"Error configuring transport for {server_id}: {e}")
+                    return False
+
+            # Create all clients
+            self.transport_manager.create_all_clients()
+
+            self.initialized = True
             return True
+
         except Exception as e:
             logger.error(f"Error initializing agent components: {e}", exc_info=True)
             # Clean up any potentially partially initialized resources
@@ -219,7 +241,7 @@ async def create_chat_completion(
         agent = Agent(
             components.database,
             components.llm_connector,
-            components.mcp_servers,
+            components.transport_manager,
             debug=False,
         )
 

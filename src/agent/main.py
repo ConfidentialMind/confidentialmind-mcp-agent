@@ -5,13 +5,14 @@ import logging
 import os
 import sys
 import uuid
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 from confidentialmind_core.config_manager import load_environment
 
 from src.agent.agent import Agent
 from src.agent.database import Database, DatabaseSettings, fetch_db_url
 from src.agent.llm import LLMConnector
+from src.agent.transport import TransportManager
 
 logger = logging.getLogger("fastmcp_agent")
 
@@ -24,14 +25,14 @@ async def main(
     db_config_id: str = "DATABASE",
     llm_config_id: str = "LLM",
     mcp_servers: Optional[Dict[str, str]] = None,
+    mode: Literal["cli", "api"] = "cli",
     debug: bool = False,
 ):
     """Run the agent with the given query."""
     # Set default MCP servers if not provided
     if mcp_servers is None:
-        mcp_servers = {
-            "agentTools": os.environ.get("AGENT_TOOLS_URL", "http://localhost:8000/sse"),
-        }
+        default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/sse")
+        mcp_servers = {"agentTools": default_mcp_server}
 
     # Initialize database
     db_url = await fetch_db_url(db_config_id)
@@ -56,13 +57,28 @@ async def main(
         print("ERROR: Failed to initialize LLM connector. Check configuration and try again.")
         return
 
+    # Create and configure transport manager
+    transport_manager = TransportManager(mode=mode)
+
+    # Configure transports based on mode
+    for server_id, server_ref in mcp_servers.items():
+        try:
+            if mode == "cli":
+                transport_manager.configure_transport(server_id, server_path=server_ref)
+            else:  # api mode
+                transport_manager.configure_transport(server_id, server_url=server_ref)
+        except Exception as e:
+            logger.error(f"Error configuring transport for {server_id}: {e}")
+            print(f"ERROR: Failed to configure transport for {server_id}. {e}")
+            return
+
     # Generate a session ID if not provided
     if not session_id:
         session_id = str(uuid.uuid4())
         logger.info(f"Generated new session ID: {session_id}")
 
     # Create and run agent
-    agent = Agent(database, llm_connector, mcp_servers, debug=debug)
+    agent = Agent(database, llm_connector, transport_manager, debug=debug)
 
     try:
         await agent.initialize()
