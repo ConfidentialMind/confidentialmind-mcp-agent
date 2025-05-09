@@ -26,6 +26,7 @@ async def main(
     llm_config_id: str = "LLM",
     mcp_servers: Optional[Dict[str, str]] = None,
     mode: Literal["cli", "api"] = "cli",
+    use_module: bool = True,
     debug: bool = False,
 ):
     """Run the agent with the given query."""
@@ -64,9 +65,16 @@ async def main(
     for server_id, server_ref in mcp_servers.items():
         try:
             if mode == "cli":
-                transport_manager.configure_transport(server_id, server_path=server_ref)
+                transport_manager.configure_transport(
+                    server_id,
+                    server_path=server_ref,
+                    use_module=use_module,
+                )
             else:  # api mode
-                transport_manager.configure_transport(server_id, server_url=server_ref)
+                transport_manager.configure_transport(
+                    server_id,
+                    server_url=server_ref,
+                )
         except Exception as e:
             logger.error(f"Error configuring transport for {server_id}: {e}")
             print(f"ERROR: Failed to configure transport for {server_id}. {e}")

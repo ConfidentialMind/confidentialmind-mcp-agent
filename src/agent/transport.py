@@ -1,10 +1,12 @@
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Literal, Optional, Union
+from typing import Dict, Literal, Optional
 
 from fastmcp import Client
 from fastmcp.client.transports import PythonStdioTransport, SSETransport
+
+from .module_transport import ModuleStdioTransport, path_to_module_path
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +21,7 @@ class TransportManager:
             mode: Operating mode - "cli" for stdio transport or "api" for SSE
         """
         self.mode = mode
-        self.transports: Dict[str, Union[PythonStdioTransport, SSETransport]] = {}
+        self.transports = {}
         self.clients: Dict[str, Client] = {}
 
     def configure_transport(
@@ -27,6 +29,7 @@ class TransportManager:
         server_id: str,
         server_path: Optional[str] = None,
         server_url: Optional[str] = None,
+        use_module: bool = True,
     ) -> None:
         """Configure transport for a specific server.
 
@@ -34,6 +37,7 @@ class TransportManager:
             server_id: Unique identifier for this server
             server_path: Path to Python script (for CLI mode)
             server_url: URL for SSE endpoint (for API mode)
+            use_module: Whether to use module execution (-m flag) for CLI mode
         """
         if server_id in self.transports:
             logger.warning(f"Transport for {server_id} already configured. Reconfiguring.")
@@ -47,8 +51,23 @@ class TransportManager:
             if not script_path.exists():
                 raise ValueError(f"Script not found: {os.path.abspath(server_path)}")
 
-            self.transports[server_id] = PythonStdioTransport(script_path=server_path)
-            logger.info(f"Configured stdio transport for {server_id}: {server_path}")
+            if use_module:
+                # Use ModuleStdioTransport for proper package imports
+                try:
+                    module_path = path_to_module_path(server_path)
+                    self.transports[server_id] = ModuleStdioTransport(module_path=module_path)
+                    logger.info(f"Configured module transport for {server_id}: {module_path}")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to create module transport for {server_id}: {e}. "
+                        f"Falling back to script transport."
+                    )
+                    self.transports[server_id] = PythonStdioTransport(script_path=server_path)
+                    logger.info(f"Configured stdio transport for {server_id}: {server_path}")
+            else:
+                # Use regular PythonStdioTransport
+                self.transports[server_id] = PythonStdioTransport(script_path=server_path)
+                logger.info(f"Configured stdio transport for {server_id}: {server_path}")
 
         elif self.mode == "api":
             if not server_url:
@@ -60,15 +79,16 @@ class TransportManager:
         else:
             raise ValueError(f"Unsupported mode: {self.mode}")
 
-    def configure_from_dict(self, config: Dict[str, str]) -> None:
+    def configure_from_dict(self, config: Dict[str, str], use_module: bool = True) -> None:
         """Configure multiple transports from a dictionary.
 
         Args:
             config: Dictionary mapping server_id to path/url
+            use_module: Whether to use module execution (-m flag) for CLI mode
         """
         for server_id, server_ref in config.items():
             if self.mode == "cli":
-                self.configure_transport(server_id, server_path=server_ref)
+                self.configure_transport(server_id, server_path=server_ref, use_module=use_module)
             else:
                 self.configure_transport(server_id, server_url=server_ref)
 
