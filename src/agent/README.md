@@ -62,7 +62,7 @@ You can provide a JSON configuration file with server definitions:
 ```json
 {
   "mcp_servers": {
-    "agentTools": "server.py" // For CLI mode (path to script)
+    "agentTools": "src/tools/postgres/__main__.py" // For CLI mode (path to script)
   }
 }
 ```
@@ -72,43 +72,67 @@ Or for API mode:
 ```json
 {
   "mcp_servers": {
-    "agentTools": "http://tools-server:8080/sse" // For API mode (SSE URL)
+    "agentTools": "http://0.0.0.0:8080/sse"
   }
 }
 ```
 
 ## Usage
 
-### CLI Mode
+The agent provides three main commands through its Typer CLI interface:
+
+### 1. Query Mode
+
+Run a single query in CLI mode:
 
 ```bash
-# Basic usage
-python -m agent.main "What tools are available?"
+# Basic query
+python -m src.agent.main query "What tools are available?"
 
 # With session ID
-python -m agent.main "Tell me more about table users" --session abc123
+python -m src.agent.main query "Tell me more about table users" --session abc123
 
 # With debug logging
-python -m agent.main "Why did the previous action fail?" --debug
+python -m src.agent.main query "Why did the previous action fail?" --debug
 
 # With custom config file
-python -m agent.main "Query the database" --config config.json
+python -m src.agent.main query "Query the database" --config config.json
+
+# With custom database and LLM connectors
+python -m src.agent.main query "Complex query" --db CUSTOM_DB --llm CUSTOM_LLM
 ```
 
-### API Server Mode
+### 2. API Server Mode
+
+Run as a standalone server with an OpenAI-compatible API endpoint:
 
 ```bash
-# Start the API server
-python -m agent.main --api
+# Start the API server with default settings
+python -m src.agent.main serve
 
 # Configure host and port
-python -m agent.main --api --host 127.0.0.1 --port 3000
+python -m src.agent.main serve --host 127.0.0.1 --port 3000
 
 # With debug logging
-python -m agent.main --api --debug
+python -m src.agent.main serve --debug
 
 # With custom config file
-python -m agent.main --api --config api_config.json
+python -m src.agent.main serve --config api_config.json
+
+# With custom database and LLM connectors
+python -m src.agent.main serve --db PRODUCTION_DB --llm GPT4
+```
+
+### 3. Clear Session History
+
+Utility to clear the conversation history for a specific session:
+
+```bash
+# Clear history for a specific session ID
+python -m src.agent.main clear-history abc123
+
+# With custom database connector
+python -m src.agent.main clear-history abc123 --db CUSTOM_DB
 ```
 
 ## API Endpoints
@@ -173,7 +197,7 @@ Response:
 
 Session IDs can be provided in one of these ways:
 
-1. In the CLI using the `--session` argument
+1. In the CLI using the `--session` option
 2. In the API via the `X-Session-ID` header
 3. Via a `session_id` cookie in the API
 4. Automatically generated if not provided
@@ -189,7 +213,7 @@ The agent can connect to the included PostgreSQL MCP server for database access:
 python -m src.tools.postgres_mcp
 
 # Then start the agent in API mode, configuring the PostgreSQL server
-python -m agent.main --api --config postgres_config.json
+python -m src.agent.main serve --config postgres_config.json
 ```
 
 Example `postgres_config.json`:
@@ -228,7 +252,12 @@ The agent uses a modular architecture with these key components:
 
 ### Debugging
 
-Enable debug logging with the `--debug` flag in either CLI or API mode.
+Enable debug logging with the `--debug` flag in any command mode:
+
+```bash
+python -m src.agent.main query "Debug this" --debug
+python -m src.agent.main serve --debug
+```
 
 ## License
 

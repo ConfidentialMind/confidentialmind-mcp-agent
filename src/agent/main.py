@@ -1,12 +1,13 @@
-import argparse
 import asyncio
 import json
 import logging
 import os
 import sys
 import uuid
+from pathlib import Path
 from typing import Dict, Literal, Optional
 
+import typer
 from confidentialmind_core.config_manager import load_environment
 
 from src.agent.agent import Agent
@@ -18,8 +19,14 @@ logger = logging.getLogger("fastmcp_agent")
 
 load_environment()
 
+app = typer.Typer(
+    name="fastmcp_agent",
+    help="FastMCP agent for interacting with MCP servers",
+    add_completion=False,
+)
 
-async def main(
+
+async def run_agent(
     query: str,
     session_id: Optional[str] = None,
     db_config_id: str = "DATABASE",
@@ -42,20 +49,30 @@ async def main(
     success = await database.connect(db_url)
     if not success:
         logger.error("Failed to connect to database")
-        print("ERROR: Failed to connect to database. Check configuration and try again.")
+        typer.secho(
+            "ERROR: Failed to connect to database. Check configuration and try again.",
+            fg=typer.colors.RED,
+        )
         return
 
     # Initialize schema if needed
     success = await database.ensure_schema()
     if not success:
         logger.warning("Could not ensure database schema. Some operations might fail.")
+        typer.secho(
+            "WARNING: Could not ensure database schema. Some operations might fail.",
+            fg=typer.colors.YELLOW,
+        )
 
     # Initialize LLM connector
     llm_connector = LLMConnector(llm_config_id)
     success = await llm_connector.initialize()
     if not success:
         logger.error("Failed to initialize LLM connector")
-        print("ERROR: Failed to initialize LLM connector. Check configuration and try again.")
+        typer.secho(
+            "ERROR: Failed to initialize LLM connector. Check configuration and try again.",
+            fg=typer.colors.RED,
+        )
         return
 
     # Create and configure transport manager
@@ -77,7 +94,9 @@ async def main(
                 )
         except Exception as e:
             logger.error(f"Error configuring transport for {server_id}: {e}")
-            print(f"ERROR: Failed to configure transport for {server_id}. {e}")
+            typer.secho(
+                f"ERROR: Failed to configure transport for {server_id}. {e}", fg=typer.colors.RED
+            )
             return
 
     # Generate a session ID if not provided
@@ -97,19 +116,19 @@ async def main(
 
             # Print response
             if state.error:
-                print(f"Error encountered: {state.error}")
+                typer.secho(f"Error encountered: {state.error}", fg=typer.colors.RED)
                 if state.response:
-                    print(f"Response: {state.response}")
+                    typer.echo(f"Response: {state.response}")
             elif state.response:
-                print(f"Response: {state.response}")
+                typer.echo(f"Response: {state.response}")
             else:
-                print("No response generated.")
+                typer.secho("No response generated.", fg=typer.colors.YELLOW)
 
             # For debugging: print thoughts
             if debug and state.thoughts:
-                print("\nAgent thoughts:")
+                typer.secho("\nAgent thoughts:", fg=typer.colors.BLUE)
                 for i, thought in enumerate(state.thoughts):
-                    print(f"{i + 1}. {thought}")
+                    typer.echo(f"{i + 1}. {thought}")
 
             # Return the final state
             return state
@@ -122,94 +141,151 @@ async def main(
         logger.info("Agent resources cleaned up")
 
 
-def run_cli():
-    """Run the agent from the command line."""
-    parser = argparse.ArgumentParser(description="Run the FastMCP agent.")
-    parser.add_argument("query", nargs="?", help="The query to run.")
-    parser.add_argument("--session", help="Session ID to use (optional).")
-    parser.add_argument("--db", help="Database config ID.", default="DATABASE")
-    parser.add_argument("--llm", help="LLM config ID.", default="LLM")
-    parser.add_argument("--config", help="Path to config file (optional).")
-    parser.add_argument("--debug", help="Enable debug logging.", action="store_true")
+def load_config_file(config_path: Optional[str]) -> Optional[Dict[str, Dict[str, str]]]:
+    """Load configuration from a JSON file."""
+    if not config_path:
+        return None
 
-    # API server options
-    parser.add_argument("--api", help="Run as API server.", action="store_true")
-    parser.add_argument("--host", help="API server host.", default="0.0.0.0")
-    parser.add_argument("--port", help="API server port.", type=int, default=8000)
+    try:
+        config_file = Path(config_path)
+        if not config_file.exists():
+            typer.secho(f"Config file not found: {config_path}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
 
-    args = parser.parse_args()
+        with open(config_file, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        typer.secho(f"Invalid JSON in config file: {config_path}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"Error loading config file: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
-    # Set up logging
-    log_level = logging.DEBUG if args.debug else logging.INFO
+
+def setup_logging(debug: bool):
+    """Set up logging with the appropriate level."""
+    log_level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
+
+@app.command()
+def query(
+    query_text: str = typer.Argument(..., help="The query to run."),
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="Session ID to use."),
+    db: str = typer.Option("DATABASE", "--db", "-d", help="Database config ID."),
+    llm: str = typer.Option("LLM", "--llm", "-l", help="LLM config ID."),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config file."),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging."),
+):
+    """Run a query in CLI mode."""
+    setup_logging(debug)
+
     # Load config file if provided
-    mcp_servers = None
-    if args.config:
-        try:
-            with open(args.config, "r") as f:
-                config = json.load(f)
-                mcp_servers = config.get("mcp_servers")
+    config_data = load_config_file(config)
+    mcp_servers = config_data.get("mcp_servers") if config_data else None
 
-                # Set environment variables for API server if needed
-                if args.api and mcp_servers:
-                    for server_id, url in mcp_servers.items():
-                        os.environ[f"MCP_SERVER_{server_id.upper()}"] = url
-        except Exception as e:
-            logger.error(f"Error loading config file: {e}")
-            print(f"Error loading config file: {e}")
-            return
-
-    # Run as API server if requested
-    if args.api:
-        try:
-            from .api import start_api_server
-
-            logger.info(f"Starting API server on {args.host}:{args.port}")
-            start_api_server(
-                host=args.host, port=args.port, log_level="debug" if args.debug else "info"
-            )
-            return
-        except ImportError as e:
-            logger.error(f"Error starting API server: {e}")
-            print(f"Error starting API server: {e}")
-            print("Make sure all required dependencies are installed.")
-            return
-        except Exception as e:
-            logger.error(f"Error starting API server: {e}")
-            print(f"Error starting API server: {e}")
-            return
-
-    # Check if query was provided for CLI mode
-    if not args.query:
-        parser.print_help()
-        print("\nError: Query is required when not running in API mode.")
-        return
-
-    # Run in CLI mode
     try:
         asyncio.run(
-            main(
-                query=args.query,
-                session_id=args.session,
-                db_config_id=args.db,
-                llm_config_id=args.llm,
+            run_agent(
+                query=query_text,
+                session_id=session,
+                db_config_id=db,
+                llm_config_id=llm,
                 mcp_servers=mcp_servers,
-                debug=args.debug,
+                mode="cli",
+                debug=debug,
             )
         )
     except KeyboardInterrupt:
-        print("Agent execution interrupted by user.")
-        sys.exit(0)
+        typer.secho("Agent execution interrupted by user.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=0)
     except Exception as e:
         logger.error(f"Unhandled error: {e}", exc_info=True)
-        print(f"ERROR: {e}")
-        sys.exit(1)
+        typer.secho(f"ERROR: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host", help="API server host."),
+    port: int = typer.Option(8000, "--port", "-p", help="API server port."),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config file."),
+    db: str = typer.Option("DATABASE", "--db", "-d", help="Database config ID."),
+    llm: str = typer.Option("LLM", "--llm", "-l", help="LLM config ID."),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging."),
+):
+    """Run the agent as an API server."""
+    setup_logging(debug)
+
+    # Load config file if provided
+    config_data = load_config_file(config)
+    mcp_servers = config_data.get("mcp_servers") if config_data else None
+
+    # Set environment variables for API server
+    if mcp_servers:
+        for server_id, url in mcp_servers.items():
+            os.environ[f"MCP_SERVER_{server_id.upper()}"] = url
+
+    # Set other environment variables
+    if db:
+        os.environ["DB_CONFIG_ID"] = db
+    if llm:
+        os.environ["LLM_CONFIG_ID"] = llm
+
+    try:
+        from src.agent.api import start_api_server
+
+        typer.secho(f"Starting API server on {host}:{port}", fg=typer.colors.GREEN)
+        start_api_server(host=host, port=port, log_level="debug" if debug else "info")
+    except ImportError as e:
+        typer.secho(f"Error starting API server: {e}", fg=typer.colors.RED)
+        typer.secho("Make sure all required dependencies are installed.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"Error starting API server: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def clear_history(
+    session: str = typer.Argument(..., help="Session ID to clear history for."),
+    db: str = typer.Option("DATABASE", "--db", "-d", help="Database config ID."),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging."),
+):
+    """Clear the conversation history for a session."""
+    setup_logging(debug)
+
+    async def _clear_history():
+        # Initialize database
+        db_url = await fetch_db_url(db)
+        db_settings = DatabaseSettings()
+        database = Database(db_settings)
+        success = await database.connect(db_url)
+        if not success:
+            typer.secho("ERROR: Failed to connect to database.", fg=typer.colors.RED)
+            return
+
+        try:
+            success = await database.clear_history(session)
+            if success:
+                typer.secho(
+                    f"Successfully cleared history for session {session}", fg=typer.colors.GREEN
+                )
+            else:
+                typer.secho(f"Failed to clear history for session {session}", fg=typer.colors.RED)
+        finally:
+            await database.disconnect()
+
+    try:
+        asyncio.run(_clear_history())
+    except Exception as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
-    run_cli()
+    app()

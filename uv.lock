@@ -426,6 +426,7 @@ dependencies = [
     { name = "ruff" },
     { name = "sqlalchemy" },
     { name = "structlog" },
+    { name = "typer" },
     { name = "uvicorn" },
 ]
 
@@ -453,6 +454,7 @@ requires-dist = [
     { name = "ruff", specifier = ">=0.11.2" },
     { name = "sqlalchemy", specifier = ">=2.0.40" },
     { name = "structlog", specifier = ">=25.3.0" },
+    { name = "typer", specifier = ">=0.15.3" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
 

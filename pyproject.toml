@@ -27,6 +27,7 @@ dependencies = [
   "ruff>=0.11.2",
   "sqlalchemy>=2.0.40",
   "structlog>=25.3.0",
+  "typer>=0.15.3",
   "uvicorn>=0.34.0",
 ]
 
