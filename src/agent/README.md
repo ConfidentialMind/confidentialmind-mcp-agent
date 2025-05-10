@@ -246,9 +246,17 @@ The agent uses a modular architecture with these key components:
 
 ### Running Tests
 
-```bash
-# TODO
-```
+Both the CLI mode and application mode of the agent can be tested separately.
+
+To test the API mode:
+
+- Initialize the postgres MCP server: `python -m src.tools.postgres_mcp`
+- Initialize the agent in API mode: `python -m src.agent.main serve`
+- Run the test: `python -m tests.test_agent_api`
+
+**TODO**
+
+- `python -m tests/test_agent_cli` (CLI)
 
 ### Debugging
 

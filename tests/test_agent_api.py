@@ -4,6 +4,11 @@ This test assumes the agent API is already running and accessible at the
 configured host and port. It tests various API endpoints including the health
 endpoint and chat completions endpoint.
 
+Before running this test:
+1. Start the PostgreSQL database
+2. Start the Postgres MCP server: python -m src.tools.postgres_mcp
+3. Start the agent API server: python -m src.agent.main serve
+
 Usage:
     python -m tests.test_agent_api
 """
@@ -13,6 +18,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 import aiohttp
+import asyncpg
 
 from tests.logger import logger
 
@@ -20,6 +26,85 @@ from tests.logger import logger
 TEST_API_HOST = "127.0.0.1"
 TEST_API_PORT = 8000
 TEST_SESSION_ID = str(uuid.uuid4())
+DATABASE_DSN = "postgresql://postgres:postgres@localhost:5432/test_db"
+
+
+async def create_test_tables() -> None:
+    """Create test tables for API server testing."""
+    logger.info("Setting up test database for API testing...")
+
+    # Connect directly to the database
+    conn = await asyncpg.connect(DATABASE_DSN)
+
+    try:
+        # Check if tables already exist
+        table_count = await conn.fetchval("""
+            SELECT COUNT(*) 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+            AND table_name IN ('api_test_users', 'api_test_products');
+        """)
+
+        if table_count > 0:
+            logger.info("Test tables already exist, dropping them first...")
+            await conn.execute("DROP TABLE IF EXISTS api_test_users, api_test_products;")
+
+        # Create api_test_users table
+        await conn.execute("""
+            CREATE TABLE api_test_users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) NOT NULL,
+                email VARCHAR(100) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        # Insert sample data
+        await conn.execute("""
+            INSERT INTO api_test_users (username, email) VALUES 
+            ('apiuser1', 'apiuser1@example.com'),
+            ('apiuser2', 'apiuser2@example.com'),
+            ('apiuser3', 'apiuser3@example.com');
+        """)
+
+        # Create api_test_products table
+        await conn.execute("""
+            CREATE TABLE api_test_products (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                price DECIMAL(10, 2) NOT NULL,
+                description TEXT
+            );
+        """)
+
+        # Insert sample data
+        await conn.execute("""
+            INSERT INTO api_test_products (name, price, description) VALUES 
+            ('API Product 1', 19.99, 'This is API product 1'),
+            ('API Product 2', 29.99, 'This is API product 2'),
+            ('API Product 3', 39.99, 'This is API product 3');
+        """)
+
+        logger.info("Test tables created successfully for API testing")
+    finally:
+        await conn.close()
+
+
+async def cleanup_test_tables() -> None:
+    """Remove test tables after testing is complete."""
+    logger.info("Cleaning up test database after API testing...")
+
+    # Connect directly to the database
+    conn = await asyncpg.connect(DATABASE_DSN)
+
+    try:
+        # Drop test tables
+        await conn.execute("DROP TABLE IF EXISTS api_test_users, api_test_products;")
+        logger.info("Test tables removed successfully")
+    except Exception as e:
+        logger.error(f"Error cleaning up test tables: {e}")
+    finally:
+        await conn.close()
 
 
 async def test_health_endpoint():
@@ -83,7 +168,7 @@ def get_response_text(result: Dict[str, Any]) -> Optional[str]:
 
 async def test_simple_query():
     """Test a simple query without tools."""
-    logger.info("Testing simple query...")
+    logger.info("Testing simple query without tools...")
 
     result = await send_chat_query("Hello, how are you today?", TEST_SESSION_ID)
 
@@ -103,12 +188,15 @@ async def test_simple_query():
 
 
 async def test_postgres_query():
-    """Test a query using the postgres MCP tool."""
-    logger.info("Testing postgres query...")
+    """Test a query using the postgres MCP tool to access the test tables."""
+    logger.info("Testing postgres query with test tables...")
 
-    result = await send_chat_query(
-        "Query the test_users table and show me all users", TEST_SESSION_ID
-    )
+    query = """
+    Query the api_test_users table and show me all users. 
+    Display the usernames and emails in a nice format.
+    """
+
+    result = await send_chat_query(query, TEST_SESSION_ID)
 
     if "error" in result:
         logger.error("Postgres query error", error=result["error"])
@@ -124,9 +212,10 @@ async def test_postgres_query():
     )
 
     # Look for indicators of successful PostgreSQL query response
-    success_indicators = ["user1", "user2", "email"]
+    success_indicators = ["apiuser1", "apiuser2", "email"]
     # Check if at least one indicator is in the response
     if any(indicator in response_text.lower() for indicator in success_indicators):
+        logger.info("Postgres query successful - found expected data in response")
         return True
     else:
         logger.warning("Postgres query might have failed - response doesn't contain expected info")
@@ -248,42 +337,89 @@ async def test_clear_history():
         return False
 
 
+async def test_postgres_products_query():
+    """Test a query using the postgres MCP tool to access the products test table."""
+    logger.info("Testing postgres query on products table...")
+
+    query = """
+    Show me all products from the api_test_products table that cost more than $25.
+    Include the name, price, and description.
+    """
+
+    result = await send_chat_query(query, TEST_SESSION_ID)
+
+    if "error" in result:
+        logger.error("Products query error", error=result["error"])
+        return False
+
+    response_text = get_response_text(result)
+    if not response_text:
+        return False
+
+    logger.info(
+        "Products query response",
+        response=response_text[:100] + "..." if len(response_text) > 100 else response_text,
+    )
+
+    # Look for indicators of successful PostgreSQL query response
+    # Only API Products 2 and 3 cost more than $25
+    success_indicators = ["API Product 2", "API Product 3", "29.99", "39.99"]
+
+    # Check if at least one indicator is in the response
+    if any(indicator in response_text for indicator in success_indicators):
+        logger.info("Products query successful - found expected data in response")
+        return True
+    else:
+        logger.warning("Products query might have failed - response doesn't contain expected info")
+        return False
+
+
 async def run():
     """Run the tests."""
     logger.info("Starting FastMCP agent API tests...")
 
-    # List of tests to run
-    tests = [
-        ("Health endpoint", test_health_endpoint),
-        ("Simple query", test_simple_query),
-        ("PostgreSQL query", test_postgres_query),
-        ("Conversation management", test_conversation_management),
-        ("Show history", test_show_history),
-        ("Clear history", test_clear_history),
-    ]
+    try:
+        # Create test tables
+        await create_test_tables()
 
-    # Run tests sequentially
-    results = {}
-    for test_name, test_func in tests:
-        logger.info(f"Running test: {test_name}")
-        try:
-            result = await test_func()
-            results[test_name] = result
-            logger.info(f"Test {test_name} {'PASSED' if result else 'FAILED'}")
-        except Exception as e:
-            logger.error(f"Test {test_name} FAILED with exception", error=str(e))
-            results[test_name] = False
+        # List of tests to run
+        tests = [
+            ("Health endpoint", test_health_endpoint),
+            ("Simple query", test_simple_query),
+            ("PostgreSQL users query", test_postgres_query),
+            ("PostgreSQL products query", test_postgres_products_query),
+            ("Conversation management", test_conversation_management),
+            ("Show history", test_show_history),
+            ("Clear history", test_clear_history),
+        ]
 
-    # Log summary
-    logger.info("Test Summary")
-    for test_name, result in results.items():
-        logger.info(f"{test_name}: {'PASSED' if result else 'FAILED'}")
+        # Run tests sequentially
+        results = {}
+        for test_name, test_func in tests:
+            logger.info(f"Running test: {test_name}")
+            try:
+                result = await test_func()
+                results[test_name] = result
+                logger.info(f"Test {test_name} {'PASSED' if result else 'FAILED'}")
+            except Exception as e:
+                logger.error(f"Test {test_name} FAILED with exception", error=str(e))
+                results[test_name] = False
 
-    # Overall result
-    if all(results.values()):
-        logger.info("All tests PASSED")
-    else:
-        logger.warning("Some tests FAILED")
+        # Log summary
+        logger.info("Test Summary")
+        for test_name, result in results.items():
+            logger.info(f"{test_name}: {'PASSED' if result else 'FAILED'}")
+
+        # Overall result
+        if all(results.values()):
+            logger.info("All tests PASSED")
+        else:
+            logger.warning("Some tests FAILED")
+
+    finally:
+        # Clean up test tables
+        logger.info("Cleaning up test environment...")
+        await cleanup_test_tables()
 
 
 if __name__ == "__main__":
