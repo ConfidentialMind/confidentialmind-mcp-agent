@@ -254,9 +254,9 @@ To test the API mode:
 - Initialize the agent in API mode: `python -m src.agent.main serve`
 - Run the test: `python -m tests.test_agent_api`
 
-**TODO**
+To test the CLI mode:
 
-- `python -m tests/test_agent_cli` (CLI)
+- Run the test: `python -m tests.test_agent_cli`
 
 ### Debugging
 
