@@ -182,7 +182,7 @@ async def test_simple_query():
 
     logger.info(
         "Simple query response",
-        response=response_text[:100] + "..." if len(response_text) > 100 else response_text,
+        response=response_text,
     )
     return True
 
@@ -208,7 +208,7 @@ async def test_postgres_query():
 
     logger.info(
         "Postgres query response",
-        response=response_text[:100] + "..." if len(response_text) > 100 else response_text,
+        response=response_text,
     )
 
     # Look for indicators of successful PostgreSQL query response
@@ -239,7 +239,7 @@ async def test_conversation_management():
 
     logger.info(
         "Conversation first response",
-        response=response1_text[:100] + "..." if len(response1_text) > 100 else response1_text,
+        response=response1_text,
     )
 
     # Second query that references the first
@@ -257,7 +257,7 @@ async def test_conversation_management():
 
     logger.info(
         "Conversation second response",
-        response=response2_text[:100] + "..." if len(response2_text) > 100 else response2_text,
+        response=response2_text,
     )
 
     # Check if the response references the first query
@@ -287,7 +287,7 @@ async def test_show_history():
 
     logger.info(
         "Show history response",
-        response=response_text[:100] + "..." if len(response_text) > 100 else response_text,
+        response=response_text,
     )
 
     # Verify that the history contains our previous queries
@@ -358,7 +358,7 @@ async def test_postgres_products_query():
 
     logger.info(
         "Products query response",
-        response=response_text[:100] + "..." if len(response_text) > 100 else response_text,
+        response=response_text,
     )
 
     # Look for indicators of successful PostgreSQL query response

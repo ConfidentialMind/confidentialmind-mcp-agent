@@ -246,17 +246,17 @@ The agent uses a modular architecture with these key components:
 
 ### Running Tests
 
-Both the CLI mode and application mode of the agent can be tested separately.
+High-level, functional, and end-to-end tests that mimic end user usage are in `tests/`.
 
 To test the API mode:
 
-- Initialize the postgres MCP server: `python -m src.tools.postgres_mcp`
+- Initialize the Postgres MCP server: `python -m src.tools.postgres_mcp`
 - Initialize the agent in API mode: `python -m src.agent.main serve`
 - Run the test: `python -m tests.test_agent_api`
 
-**TODO**
+To test the CLI mode:
 
-- `python -m tests/test_agent_cli` (CLI)
+- Run the test: `python -m tests.test_agent_cli`
 
 ### Debugging
 
@@ -266,7 +266,3 @@ Enable debug logging with the `--debug` flag in any command mode:
 python -m src.agent.main query "Debug this" --debug
 python -m src.agent.main serve --debug
 ```
-
-## License
-
-Confidential Mind proprietary software.
