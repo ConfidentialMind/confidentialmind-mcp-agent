@@ -18,7 +18,6 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy project files needed for installation
 COPY pyproject.toml .
-COPY api/ ./api/
 COPY src/ ./src/
 
 # Install Python dependencies into the virtual environment using uv
@@ -42,7 +41,6 @@ WORKDIR /app
 
 # Copy application code from the current context (not builder stage)
 # Ensure ownership is set to the non-root user
-COPY --chown=appuser:appgroup api/ ./api/
 COPY --chown=appuser:appgroup src/ ./src/
 
 # Set environment variables (adjust if needed)
@@ -56,4 +54,4 @@ USER appuser
 EXPOSE 8080
 
 # Command to run the application using uvicorn (installed in the venv)
-CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "src.agent.main", "serve", "--host", "0.0.0.0", "--port", "8080"]

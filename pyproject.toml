@@ -9,7 +9,7 @@ dependencies = [
   "asyncpg>=0.30.0",
   "backoff>=2.2.1",
   "black>=25.1.0",
-  "confidentialmind-core==0.1.7",
+  "confidentialmind-core==0.1.8",
   "fastapi>=0.115.12",
   "fastmcp>=2.2.8",
   "greenlet>=3.1.1",

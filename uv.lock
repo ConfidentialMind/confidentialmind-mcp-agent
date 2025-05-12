@@ -387,7 +387,7 @@ wheels = [
 
 [[package]]
 name = "confidentialmind-core"
-version = "0.1.7"
+version = "0.1.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
@@ -396,7 +396,7 @@ dependencies = [
     { name = "websockets" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c6/db/1912c5cc8235a1a7c337eb03ee856690597afe191bafd16763dde51bc1d7/confidentialmind_core-0.1.7-py3-none-any.whl", hash = "sha256:d436010d432d7d30cf7d24e16311129c73ade41fa96513bd4669d01e42a476dc", size = 17517, upload-time = "2025-04-16T13:14:57.622Z" },
+    { url = "https://files.pythonhosted.org/packages/db/b7/e82a5e2827d8dc6231fd72882224c3dfb083adbdc2068852728258567704/confidentialmind_core-0.1.8-py3-none-any.whl", hash = "sha256:8ec3e3d4ef723ac02b34f13db75e7d51a718f64ce401e756fb338cb2207087df", size = 17699, upload-time = "2025-04-16T14:14:06.349Z" },
 ]
 
 [[package]]
@@ -436,7 +436,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "backoff", specifier = ">=2.2.1" },
     { name = "black", specifier = ">=25.1.0" },
-    { name = "confidentialmind-core", specifier = "==0.1.7" },
+    { name = "confidentialmind-core", specifier = "==0.1.8" },
     { name = "fastapi", specifier = ">=0.115.12" },
     { name = "fastmcp", specifier = ">=2.2.8" },
     { name = "greenlet", specifier = ">=3.1.1" },
