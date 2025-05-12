@@ -10,6 +10,7 @@ from typing import Dict, Literal, Optional
 import typer
 from confidentialmind_core.config_manager import load_environment
 
+from agent.connectors import ConnectorConfigManager
 from src.agent.agent import Agent
 from src.agent.database import Database, DatabaseSettings, fetch_db_url
 from src.agent.llm import LLMConnector
@@ -220,6 +221,9 @@ def serve(
 ):
     """Run the agent as an API server."""
     setup_logging(debug)
+
+    # Initialize connector configuration
+    asyncio.run(ConnectorConfigManager().initialize())
 
     # Load config file if provided
     config_data = load_config_file(config)

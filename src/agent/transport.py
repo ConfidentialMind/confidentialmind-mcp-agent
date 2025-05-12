@@ -6,7 +6,8 @@ from typing import Dict, Literal, Optional
 from fastmcp import Client
 from fastmcp.client.transports import PythonStdioTransport, SSETransport
 
-from .module_transport import ModuleStdioTransport, path_to_module_path
+from src.agent.connectors import ConnectorConfigManager
+from src.agent.module_transport import ModuleStdioTransport, path_to_module_path
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,23 @@ class TransportManager:
                 self.configure_transport(server_id, server_path=server_ref, use_module=use_module)
             else:
                 self.configure_transport(server_id, server_url=server_ref)
+
+    async def configure_from_stack(self) -> None:
+        """Configure transports using MCP servers from the stack."""
+        connector_manager = ConnectorConfigManager()
+        servers = await connector_manager.fetch_mcp_servers()
+
+        if not servers:
+            logger.warning("No MCP servers found from stack configuration")
+            return
+
+        # Configure transports based on mode
+        for server_id, server_url in servers.items():
+            try:
+                logger.info(f"Configuring transport for {server_id} from stack")
+                self.configure_transport(server_id, server_url=server_url)
+            except Exception as e:
+                logger.error(f"Error configuring transport for {server_id}: {e}")
 
     def create_client(self, server_id: str) -> Optional[Client]:
         """Create a FastMCP client for a configured transport.

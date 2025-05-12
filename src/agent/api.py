@@ -14,7 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from src.agent.agent import Agent
-from src.agent.database import Database, DatabaseSettings, fetch_db_url
+from src.agent.connectors import ConnectorConfigManager
+from src.agent.database import Database, DatabaseSettings
 from src.agent.llm import LLMConnector
 from src.agent.transport import TransportManager
 
@@ -96,8 +97,12 @@ class AgentComponents:
             return True
 
         try:
+            # Initialize connector configuration
+            connector_manager = ConnectorConfigManager()
+            await connector_manager.initialize()
+
             # Initialize database
-            db_url = await fetch_db_url(self.db_config_id)
+            db_url = await connector_manager.fetch_database_url(self.db_config_id)
             db_settings = DatabaseSettings()
             self.database = Database(db_settings)
             success = await self.database.connect(db_url)
@@ -117,18 +122,21 @@ class AgentComponents:
                 logger.error("Failed to initialize LLM connector")
                 return False
 
-            self.initialized = True
-
             # Initialize transport manager for API mode
             self.transport_manager = TransportManager(mode="api")
 
-            # Configure transports
-            for server_id, server_url in self.mcp_servers.items():
-                try:
-                    self.transport_manager.configure_transport(server_id, server_url=server_url)
-                except Exception as e:
-                    logger.error(f"Error configuring transport for {server_id}: {e}")
-                    return False
+            if connector_manager.is_stack_deployment:
+                # Get MCP servers from stack
+                await self.transport_manager.configure_from_stack()
+
+            else:
+                # Configure transports
+                for server_id, server_url in self.mcp_servers.items():
+                    try:
+                        self.transport_manager.configure_transport(server_id, server_url=server_url)
+                    except Exception as e:
+                        logger.error(f"Error configuring transport for {server_id}: {e}")
+                        return False
 
             # Create all clients
             self.transport_manager.create_all_clients()

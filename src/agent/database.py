@@ -8,6 +8,7 @@ import backoff
 from confidentialmind_core.config_manager import get_api_parameters
 from pydantic_settings import BaseSettings
 
+from src.agent.connectors import ConnectorConfigManager
 from src.agent.state import Message
 
 # Configure logging
@@ -409,9 +410,9 @@ class Database:
             return False
 
 
-async def fetch_db_url(config_id: str) -> Optional[str]:
+async def fetch_db_url(config_id: str = "DATABASE") -> Optional[str]:
     """
-    Try to fetch the database URL from the connector until available.
+    Fetch the database URL using ConnectorConfigManager.
 
     Args:
         config_id: The ConfigManager config_id for the database connector
@@ -419,30 +420,5 @@ async def fetch_db_url(config_id: str) -> Optional[str]:
     Returns:
         Database URL or None if not available
     """
-    # First try from SDK ConfigManager
-    try:
-        url, _ = get_api_parameters(config_id)
-        if url:
-            logger.info(f"Successfully retrieved database URL from ConfigManager: {url}")
-            return url
-    except Exception as e:
-        logger.warning(f"Error fetching database URL from ConfigManager: {e}")
-
-    # If SDK fails, retry for a limited time
-    retries = 3
-    for i in range(retries):
-        try:
-            url, _ = get_api_parameters(config_id)
-            if url:
-                logger.info(
-                    f"Successfully retrieved database URL from ConfigManager on retry: {url}"
-                )
-                return url
-        except Exception as e:
-            logger.warning(f"Retry {i + 1}/{retries}: Error fetching database URL: {e}")
-
-        # Wait before retrying
-        await asyncio.sleep(5)
-
-    logger.warning(f"Failed to retrieve database URL after {retries} retries")
-    return None
+    connector_manager = ConnectorConfigManager()
+    return await connector_manager.fetch_database_url(config_id)

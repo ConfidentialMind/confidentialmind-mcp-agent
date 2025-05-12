@@ -6,10 +6,9 @@ import uuid
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
-from fastmcp import Client
-from fastmcp.client.transports import SSETransport
 from fastmcp.exceptions import ClientError
 
+from src.agent.connectors import ConnectorConfigManager
 from src.agent.database import Database
 from src.agent.llm import LLMConnector
 from src.agent.state import AgentState, Message
@@ -52,7 +51,18 @@ class Agent:
         """Initialize agent components."""
         logger.info("Initializing agent...")
 
-        # Ensure all clients are created
+        # Check if we're in stack deployment mode
+        connector_manager = ConnectorConfigManager()
+        is_stack_deployment = connector_manager.is_stack_deployment
+
+        if is_stack_deployment:
+            # Initialize connectors with stack
+            await connector_manager.initialize()
+
+            # Configure MCP transports from stack
+            await self.transport_manager.configure_from_stack()
+
+        # Create all clients (will use whichever transports were configured)
         self.transport_manager.create_all_clients()
 
         # Log available clients
