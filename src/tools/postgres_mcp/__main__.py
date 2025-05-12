@@ -5,6 +5,8 @@ import signal
 import sys
 from threading import Event
 
+from confidentialmind_core.config_manager import load_environment
+
 from .server import mcp_server
 from .settings import settings
 
@@ -55,6 +57,14 @@ if __name__ == "__main__":
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
+    # Initialize environment variables and check SDK mode
+    load_environment()
+
+    # Check for SDK connector mode based on environment variable
+    if os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "True").lower() == "false":
+        settings.use_sdk_connector = True
+        logger.info("Using ConfidentialMind SDK connector for database connection")
 
     logger.info(
         f"Starting Postgres MCP server for database '{settings.database}' "

@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 
 import asyncpg
 
+from .connection_manager import ConnectionManager
 from .settings import settings
 
 logger = logging.getLogger(__name__)
@@ -29,17 +30,9 @@ class QueryValidationError(ValueError):
 
 
 async def create_pool() -> asyncpg.Pool:
-    """Creates an asyncpg connection pool."""
-    logger.info(f"Creating database connection pool for {settings.database}...")
-    try:
-        pool = await asyncpg.create_pool(dsn=settings.effective_dsn, min_size=1, max_size=5)
-        if not pool:
-            raise ConnectionError("Failed to create database pool (returned None).")
-        logger.info("Database connection pool created successfully.")
-        return pool
-    except Exception as e:
-        logger.error(f"Error creating database connection pool: {e}")
-        raise ConnectionError(f"Failed to connect to database: {e}")
+    """Creates an asyncpg connection pool with ConfidentialMind support."""
+    await ConnectionManager.initialize()
+    return await ConnectionManager.create_pool()
 
 
 class DatabaseClient:

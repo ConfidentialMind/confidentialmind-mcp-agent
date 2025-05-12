@@ -3,9 +3,12 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
+from confidentialmind_core.config_manager import ConfigManager, ConnectorSchema, load_environment
 from fastmcp import Context, FastMCP
 
+from .connection_manager import ConnectionManager
 from .db import DatabaseClient, create_pool
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -13,34 +16,50 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
-    Handles database pool setup and teardown.
-
-    This context manager ensures proper creation and cleanup of the database
-    connection pool, even when the server is interrupted with Ctrl+C.
+    Handles database pool setup and teardown with ConfidentialMind support.
     """
     pool = None
     state = {}
 
     try:
-        # Create the pool
+        # Initialize ConfidentialMind integration if enabled
+        if settings.use_sdk_connector:
+            load_environment()
+            logger.info("Initializing ConfigManager...")
+
+            try:
+                config_manager = ConfigManager()
+                connectors = [
+                    ConnectorSchema(
+                        type="database",
+                        label="PostgreSQL Database",
+                        config_id=settings.connector_id,
+                    )
+                ]
+                config_manager.init_manager(connectors=connectors)
+                logger.info("ConfigManager initialized successfully")
+            except Exception as e:
+                logger.warning(f"ConfigManager initialization warning: {e}")
+                logger.info("Continuing with fallback settings")
+
+        # Create the pool using our ConnectionManager
         pool = await create_pool()
         state["db_pool"] = pool
-        logger.info("Database pool created and stored in application state.")
+        logger.info("Database pool created and stored in application state")
         yield state
+
     except (asyncio.CancelledError, KeyboardInterrupt) as e:
-        # Handle cancellation specifically
         logger.info(f"Server startup interrupted: {type(e).__name__}")
-        raise  # Re-raise to allow proper shutdown
+        raise
     except Exception as e:
         logger.critical(f"Database connection failed on startup: {e}")
         yield state
     finally:
-        # Always try to close the pool in the finally block
         if pool:
-            logger.info("Shutting down server, closing database connection pool.")
+            logger.info("Shutting down server, closing database pool")
             try:
-                await pool.close()
-                logger.info("Database connection pool closed successfully.")
+                await ConnectionManager.close()
+                logger.info("Database pool closed")
             except Exception as e:
                 logger.error(f"Error closing database pool: {e}")
 
