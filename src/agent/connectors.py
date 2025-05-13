@@ -10,8 +10,16 @@ from confidentialmind_core.config_manager import (
     get_api_parameters,
     load_environment,
 )
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+
+class AgentConfig(BaseModel):
+    """Minimal config for the agent."""
+
+    name: str = "confidentialmind-agent"
+    description: str = "FastMCP agent for ConfidentialMind stack"
 
 
 class ConnectorConfigManager:
@@ -33,20 +41,25 @@ class ConnectorConfigManager:
 
         if register_connectors and self.is_stack_deployment:
             # Register connectors with the ConfigManager
+
             try:
                 # Database connector for session management
                 db_connector = ConnectorSchema(
-                    type="database", label="Session Management Database", config_id="DATABASE"
+                    type="database",
+                    label="Session Management Database",
+                    config_id="DATABASE",
                 )
 
                 # MCP servers connector (supports multiple servers)
                 mcp_servers_connector = ArrayConnectorSchema(
-                    type="agent_tool", label="MCP Tool Servers", config_id="MCP_SERVERS"
+                    type="agent_tool",
+                    label="MCP Tool Servers",
+                    config_id="MCP_SERVERS",
                 )
 
                 # Initialize the ConfigManager with our connectors
                 config_manager.init_manager(
-                    config_model=None,  # No custom config model needed
+                    config_model=AgentConfig(),
                     connectors=[db_connector],
                     array_connectors=[mcp_servers_connector],
                 )
