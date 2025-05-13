@@ -1,8 +1,11 @@
 import logging
+import os
 from typing import Optional
 
 import aiohttp
-from confidentialmind_core.config_manager import get_api_parameters
+from confidentialmind_core.config_manager import get_api_parameters, load_environment
+
+from src.agent.connectors import ConnectorConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,16 @@ class LLMConnector:
         self._last_headers = None
         self._session = None
 
+        # Determine if running in stack deployment mode
+        load_environment()
+        self._is_stack_deployment = (
+            os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
+        )
+
+        logger.info(
+            f"LLM connector initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode"
+        )
+
     async def initialize(self) -> bool:
         """
         Initialize the connector by fetching API parameters.
@@ -32,8 +45,16 @@ class LLMConnector:
             bool: True if initialization was successful
         """
         try:
-            # Get current connection details from SDK
-            current_base_url, headers = get_api_parameters(self.config_id)
+            # Get connection details using ConnectorConfigManager for consistency
+            connector_manager = ConnectorConfigManager()
+
+            # In stack mode, make sure connectors are registered
+            if self._is_stack_deployment:
+                await connector_manager.initialize(register_connectors=True)
+            else:
+                await connector_manager.initialize(register_connectors=False)
+
+            current_base_url, headers = await connector_manager.fetch_llm_url(self.config_id)
 
             # Check if connector is configured
             if not current_base_url:
@@ -48,6 +69,7 @@ class LLMConnector:
             if self._session is None:
                 self._session = aiohttp.ClientSession(headers=self._last_headers)
 
+            logger.info(f"Successfully initialized LLM connector for {self.config_id}")
             return True
         except Exception as e:
             logger.error(f"Error initializing LLM connector: {e}")

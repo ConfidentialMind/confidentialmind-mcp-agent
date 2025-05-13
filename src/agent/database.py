@@ -1,11 +1,12 @@
 import asyncio
 import logging
+import os
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 import backoff
-from confidentialmind_core.config_manager import get_api_parameters
+from confidentialmind_core.config_manager import ConfigManager, get_api_parameters, load_environment
 from pydantic_settings import BaseSettings
 
 from src.agent.connectors import ConnectorConfigManager
@@ -29,7 +30,7 @@ def get_backoff_config() -> Dict[str, Any]:
 class DatabaseSettings(BaseSettings):
     """Settings for PostgreSQL connection used by the agent for session management"""
 
-    # Default connection settings
+    # Default connection settings (used for local development)
     database_host: str = "localhost"
     database_port: int = 5432
     database_user: str = "app"
@@ -53,17 +54,33 @@ class DatabaseSettings(BaseSettings):
         """
         logger.debug(f"Generating connection string. SDK URL provided: {db_url}")
 
-        if db_url:
-            # Use the SDK-provided URL as the host part
-            host_part = db_url
-            logger.info(f"Using SDK-provided DB host/endpoint: {host_part}")
-        else:
-            # Fallback to default host:port if no SDK URL is available
-            host_part = f"{self.database_host}:{self.database_port}"
-            logger.info(f"Using default DB host/port settings: {host_part}")
+        is_local_config = (
+            os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() == "true"
+        )
 
-        # Construct DSN using potentially overridden user/pass/db from BaseSettings
-        dsn = f"postgresql://{self.database_user}:{self.database_password}@{host_part}/{self.database_name}"
+        if is_local_config and db_url:
+            # Local config mode with URL - use the SDK-provided URL as the host part
+            host_part = db_url
+            logger.info(f"Using SDK-provided DB host/endpoint in local config mode: {host_part}")
+
+            # Construct DSN using potentially overridden user/pass/db from BaseSettings
+            dsn = f"postgresql://{self.database_user}:{self.database_password}@{host_part}/{self.database_name}"
+        elif is_local_config:
+            # Local config mode with no URL - use default settings
+            host_part = f"{self.database_host}:{self.database_port}"
+            logger.info(f"Using default DB settings in local config mode: {host_part}")
+
+            # Construct DSN using potentially overridden user/pass/db from BaseSettings
+            dsn = f"postgresql://{self.database_user}:{self.database_password}@{host_part}/{self.database_name}"
+        else:
+            # Stack deployment mode - use the full DSN from the stack without modifications
+            # Note: db_url in this context is expected to be the full DSN
+            if not db_url:
+                raise ValueError("No database URL provided in stack deployment mode")
+
+            dsn = f"postgresql://{self.database_user}:{self.database_password}@{db_url}/{self.database_name}"
+            logger.info("Using the complete DSN from the stack configuration")
+
         logger.info(f"Constructed DSN: {self._get_safe_connection_string(dsn)}")
         return dsn
 
@@ -96,9 +113,67 @@ class Database:
         self._is_connecting: bool = False
         self._reconnect_task: Optional[asyncio.Task] = None
         self._current_db_url: Optional[str] = None
+        self._config_id: str = os.environ.get("DB_CONFIG_ID", "DATABASE")
+
+        # Load environment variables to set LOCAL_CONFIG flag
+        load_environment()
+        self._is_stack_deployment = (
+            os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
+        )
+
+        logger.info(
+            f"Database initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode"
+        )
+
+    async def fetch_db_url(self) -> Optional[str]:
+        """
+        Fetch database URL with infinite polling if in stack deployment mode.
+        Similar to the baserag implementation pattern.
+
+        Returns:
+            Database URL from the stack or None if in local mode with no URL available
+        """
+        if not self._is_stack_deployment:
+            # In local mode, just get the URL from environment once
+            url, _ = get_api_parameters(self._config_id)
+            if url:
+                logger.info(f"Retrieved database URL from environment: {url}")
+            else:
+                logger.warning(f"No database URL found in environment for {self._config_id}")
+            return url
+
+        # In stack deployment mode, poll until URL is available
+        logger.info(f"Waiting for {self._config_id} URL from stack...")
+        while True:
+            try:
+                url, _ = get_api_parameters(self._config_id)
+                if url:
+                    logger.info(f"Successfully retrieved {self._config_id} URL from stack")
+
+                    # If Confidentialmind SDK provides a full connection string via config manager,
+                    # we get it here; otherwise, we get the base URL to build upon
+                    if self._is_stack_deployment:
+                        # In stack mode, try to get the full connection string from ConfigManager
+                        try:
+                            config_manager = ConfigManager()
+                            full_url = config_manager.config.get_connection_string(url)
+                            if full_url:
+                                logger.info("Got full connection string from ConfigManager")
+                                return full_url
+                        except (AttributeError, Exception) as e:
+                            logger.warning(
+                                f"Could not get connection string from ConfigManager: {e}"
+                            )
+                            # Fall back to using the URL directly if config manager doesn't work
+
+                    return url
+            except Exception as e:
+                logger.debug(f"Error fetching {self._config_id} URL, waiting: {e}")
+
+            await asyncio.sleep(5)  # Wait before retrying
 
     async def connect(self, db_url: Optional[str] = None) -> bool:
-        """Establish connection to database with proper locking"""
+        """Establish connection to database with proper locking and stack integration"""
         if self._is_connecting:
             logger.info("Connection attempt already in progress")
             return self.is_connected()
@@ -108,8 +183,24 @@ class Database:
 
         self._is_connecting = True
         try:
+            # Fetch or use the provided database URL
             if db_url:
                 self._current_db_url = db_url
+            elif not self._current_db_url:
+                # Use ConnectorConfigManager for consistency
+                connector_manager = ConnectorConfigManager()
+
+                # In stack mode, make sure connectors are registered
+                if self._is_stack_deployment:
+                    await connector_manager.initialize(register_connectors=True)
+                else:
+                    await connector_manager.initialize(register_connectors=False)
+
+                self._current_db_url = await connector_manager.fetch_database_url(self._config_id)
+
+            if not self._current_db_url and self._is_stack_deployment:
+                logger.error("No database URL available in stack deployment mode")
+                return False
 
             # Build connection string and connect
             connection_string = self.settings.get_connection_string(self._current_db_url)
@@ -414,6 +505,9 @@ async def fetch_db_url(config_id: str = "DATABASE") -> Optional[str]:
     """
     Fetch the database URL using ConnectorConfigManager.
 
+    This is a convenience function that can be used by other components to get
+    the database URL without creating a Database instance.
+
     Args:
         config_id: The ConfigManager config_id for the database connector
 
@@ -421,4 +515,5 @@ async def fetch_db_url(config_id: str = "DATABASE") -> Optional[str]:
         Database URL or None if not available
     """
     connector_manager = ConnectorConfigManager()
+    await connector_manager.initialize(register_connectors=False)
     return await connector_manager.fetch_database_url(config_id)

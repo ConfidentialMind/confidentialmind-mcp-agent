@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from confidentialmind_core.config_manager import (
     ArrayConnectorSchema,
@@ -40,31 +40,43 @@ class ConnectorConfigManager:
         config_manager = ConfigManager()
 
         if register_connectors and self.is_stack_deployment:
-            # Register connectors with the ConfigManager
-
+            # Register connectors with the ConfigManager in stack deployment mode
             try:
-                # Database connector for session management
-                db_connector = ConnectorSchema(
-                    type="database",
-                    label="Session Management Database",
-                    config_id="DATABASE",
-                )
+                # Register connectors that the agent needs
+                connectors = [
+                    # Database connector for session management
+                    ConnectorSchema(
+                        type="database",
+                        label="Session Management Database",
+                        config_id="DATABASE",
+                    ),
+                    # LLM connector for language model integration
+                    ConnectorSchema(
+                        type="llm",
+                        label="Language Model",
+                        config_id="LLM",
+                    ),
+                ]
 
                 # MCP servers connector (supports multiple servers)
-                mcp_servers_connector = ArrayConnectorSchema(
-                    type="agent_tool",
-                    label="MCP Tool Servers",
-                    config_id="MCP_SERVERS",
-                )
+                array_connectors = [
+                    ArrayConnectorSchema(
+                        type="agent_tool",
+                        label="MCP Tool Servers",
+                        config_id="MCP_SERVERS",
+                    )
+                ]
 
                 # Initialize the ConfigManager with our connectors
                 config_manager.init_manager(
                     config_model=AgentConfig(),
-                    connectors=[db_connector],
-                    array_connectors=[mcp_servers_connector],
+                    connectors=connectors,
+                    array_connectors=array_connectors,
                 )
 
-                logger.info("Registered connectors with ConfigManager")
+                logger.info(
+                    f"Registered {len(connectors)} connectors and {len(array_connectors)} array connectors"
+                )
             except Exception as e:
                 logger.error(f"Error registering connectors: {e}")
 
@@ -88,6 +100,25 @@ class ConnectorConfigManager:
         else:
             # Stack deployment mode - use infinite polling loop
             return await self._fetch_url_with_polling(config_id)
+
+    async def fetch_llm_url(self, config_id: str = "LLM") -> Tuple[Optional[str], Optional[Dict]]:
+        """Fetch LLM URL and headers using the appropriate method based on deployment mode."""
+        if not self.is_stack_deployment:
+            # Local development mode - use get_api_parameters directly
+            try:
+                url, headers = get_api_parameters(config_id)
+                if url:
+                    logger.info(f"Successfully retrieved LLM URL from environment: {url}")
+                    return url, headers
+                logger.warning(f"No LLM URL found in environment for {config_id}")
+                return None, None
+            except Exception as e:
+                logger.error(f"Error fetching LLM URL from environment: {e}")
+                return None, None
+        else:
+            # Stack deployment mode - use infinite polling loop
+            url = await self._fetch_url_with_polling(config_id)
+            return url, {}  # In stack mode, headers are handled differently
 
     async def fetch_mcp_servers(self, config_id: str = "MCP_SERVERS") -> Dict[str, str]:
         """Fetch MCP server URLs from stack or environment."""
@@ -115,7 +146,7 @@ class ConnectorConfigManager:
             return await self._fetch_mcp_servers_with_polling(config_id)
 
     async def _fetch_url_with_polling(self, config_id: str) -> Optional[str]:
-        """Poll for database URL indefinitely until provided by the stack."""
+        """Poll for URL indefinitely until provided by the stack."""
         logger.info(f"Waiting for {config_id} URL from stack...")
         while True:
             try:
