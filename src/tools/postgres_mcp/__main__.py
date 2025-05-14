@@ -42,14 +42,30 @@ def signal_handler(sig, frame):
 
 
 async def run_server(transport_type, **kwargs):
-    """Run the MCP server with shutdown handling."""
+    """Run the MCP server with shutdown handling and proactive initialization."""
     try:
+        # Proactively initialize ConnectionManager before server starts
+        from .connection_manager import ConnectionManager
+
+        logger.info("Proactively initializing ConnectionManager...")
+        await ConnectionManager.initialize()
+        logger.info("ConnectionManager initialized successfully")
+
+        # Now run the server as usual
         return await mcp_server.run_async(transport=transport_type, **kwargs)
     except asyncio.CancelledError:
         logger.info("Server task cancelled, shutting down gracefully")
     except Exception as e:
         logger.critical(f"Server failed to run: {e}", exc_info=True)
     finally:
+        # Ensure ConnectionManager is closed on shutdown
+        try:
+            from .connection_manager import ConnectionManager
+
+            await ConnectionManager.close()
+            logger.info("ConnectionManager closed during shutdown")
+        except Exception as e:
+            logger.error(f"Error closing ConnectionManager: {e}")
         logger.info("Server shutdown complete.")
 
 
@@ -98,7 +114,7 @@ if __name__ == "__main__":
         else:
             # Default to SSE transport for standalone server mode
             logger.info("Using SSE transport on port 8080")
-            main_task = asyncio.ensure_future(run_server("sse", port=8080))
+            main_task = asyncio.ensure_future(run_server("sse", port=8080, log_level="debug"))
 
         loop.run_until_complete(main_task)
     except KeyboardInterrupt:

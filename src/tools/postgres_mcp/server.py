@@ -41,7 +41,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         # Create pool, handling failures appropriately
         try:
             # Non-blocking pool creation attempt
-            pool = await asyncio.wait_for(create_pool(), timeout=3.0)
+            pool = await asyncio.wait_for(create_pool(), timeout=10.0)
             if pool:
                 state["db_pool"] = pool
                 logger.info("Database pool created and stored in application state")

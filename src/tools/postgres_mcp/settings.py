@@ -12,9 +12,12 @@ class PostgresSettings(BaseSettings):
 
     host: str = Field(default="localhost")
     port: int = Field(default=5432)
-    user: str = Field(default="postgres")
-    password: str = Field(default="postgres")
-    database: str = Field(default="test_db")
+    # user: str = Field(default="postgres")
+    # password: str = Field(default="postgres")
+    # database: str = Field(default="test_db")
+    user: str = Field(default="app")
+    password: str = Field(default="testpass")
+    database: str = Field(default="vector-db")
 
     # Optional direct DSN
     dsn: Optional[str] = Field(default=None)
@@ -36,15 +39,31 @@ class PostgresSettings(BaseSettings):
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
 
     def get_connection_string(self, sdk_url: Optional[str] = None) -> str:
-        """Generate connection string with optional SDK URL incorporation."""
+        """Generate connection string with optional SDK URL incorporation, matching agent approach."""
+        # If DSN is explicitly set, use it over everything else
         if self.dsn:
             return self.dsn
 
-        if sdk_url:
-            # Extract host:port from SDK URL and use with credentials
-            return f"postgresql://{self.user}:{self.password}@{sdk_url}/{self.database}"
+        is_local_config = not self.is_stack_deployment
 
-        return self.effective_dsn
+        if is_local_config and sdk_url:
+            # Local config mode with URL - use the SDK-provided URL as the host part
+            # but still use credentials from settings
+            return f"postgresql://{self.user}:{self.password}@{sdk_url}/{self.database}"
+        elif is_local_config:
+            # Local config mode with no URL - use default settings
+            host_part = f"{self.host}:{self.port}"
+            return f"postgresql://{self.user}:{self.password}@{host_part}/{self.database}"
+        else:
+            # Stack deployment mode - use the URL as the endpoint without default credentials
+            # The SDK URL in stack mode is expected to be the hostname with correct credentials
+            # coming from database authentication
+            if not sdk_url:
+                raise ValueError("No database URL provided in stack deployment mode")
+
+            # In stack deployment, we only use the hostname/port from SDK URL
+            # and don't append our default credentials
+            return f"postgresql://{self.user}:{self.password}@{sdk_url}/{self.database}"
 
 
 # Single settings instance

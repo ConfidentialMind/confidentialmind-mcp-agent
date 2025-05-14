@@ -30,7 +30,7 @@ spec:
     - name: registry-host
       value: confidentialmind.azurecr.io/main/services
     - name: image-reference
-      value: mcp-postgres:0.1.1
+      value: mcp-postgres:0.1.2
     - name: service-name
       value: mcp-postgres
     - name: values_file

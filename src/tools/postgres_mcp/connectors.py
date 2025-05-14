@@ -4,6 +4,7 @@ import os
 from typing import Optional
 
 from confidentialmind_core.config_manager import (
+    ArrayConnectorSchema,
     ConfigManager,
     ConnectorSchema,
     get_api_parameters,
@@ -57,13 +58,10 @@ class PostgresConnectorManager:
                         config_id=self.connector_id,
                     ),
                 ]
-
-                # Initialize the ConfigManager with our connector
                 config_manager.init_manager(
                     config_model=PostgresConfig(),
                     connectors=connectors,
                 )
-
                 logger.info(
                     f"PostgresConnectorManager: Registered database connector with config_id={self.connector_id}"
                 )

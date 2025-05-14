@@ -214,7 +214,7 @@ class Database:
             # Build connection string and connect
             connection_string = self.settings.get_connection_string(self._current_db_url)
 
-            logger.debug(
+            logger.info(
                 f"Connecting to database with connection string: {self.settings._get_safe_connection_string(connection_string)}"
             )
 

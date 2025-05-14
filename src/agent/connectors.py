@@ -66,7 +66,7 @@ class ConnectorConfigManager:
                     ArrayConnectorSchema(
                         type="agent_tool",
                         label="MCP Tool Servers",
-                        config_id="MCP_SERVERS",
+                        config_id="agentTools",
                     )
                 ]
 

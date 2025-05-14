@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir \
   pydantic>=2.0.0 \
   pydantic-settings>=2.0.0 \
   backoff>=2.2.1 \
-  confidentialmind-core==0.1.7 \
+  confidentialmind-core==0.1.8 \
   structlog>=20.0.0
 
 # Copy MCP protocol and server code
