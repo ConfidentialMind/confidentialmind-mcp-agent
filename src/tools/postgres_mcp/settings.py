@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 from pydantic import Field
@@ -21,6 +22,11 @@ class PostgresSettings(BaseSettings):
     # ConfidentialMind integration
     connector_id: str = Field(default="DATABASE")
     use_sdk_connector: bool = Field(default=False)
+
+    @property
+    def is_stack_deployment(self) -> bool:
+        """Determine if running in stack deployment mode."""
+        return os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
 
     @property
     def effective_dsn(self) -> str:

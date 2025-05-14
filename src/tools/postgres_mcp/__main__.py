@@ -58,32 +58,46 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Initialize environment variables and check SDK mode
+    # Initialize environment variables and check deployment mode
     load_environment()
 
-    # Check for SDK connector mode based on environment variable
-    if os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "True").lower() == "false":
-        settings.use_sdk_connector = True
-        logger.info("Using ConfidentialMind SDK connector for database connection")
-
-    logger.info(
-        f"Starting Postgres MCP server for database '{settings.database}' "
-        f"on {settings.host}:{settings.port}"
+    # Determine deployment mode
+    is_stack_deployment = (
+        os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
     )
 
-    try:
-        use_stdio = (
-            "FastMCP_TRANSPORT" in os.environ  # Set by modified transport
-            or not sys.stdout.isatty()  # No terminal -> stdio
-            or "--stdio" in sys.argv  # Explicit flag
+    if is_stack_deployment:
+        settings.use_sdk_connector = True
+        logger.info("Running in stack deployment mode with SDK connector integration")
+    else:
+        logger.info(
+            f"Running in local mode for database '{settings.database}' "
+            f"on {settings.host}:{settings.port}"
         )
+
+    try:
+        # Modified logic for transport selection
+        # Only use stdio if explicitly requested or when launched as a subprocess
+        use_stdio = (
+            "FastMCP_TRANSPORT" in os.environ
+            and os.environ["FastMCP_TRANSPORT"] == "stdio"
+            or "--stdio" in sys.argv
+        )
+
+        # Force SSE mode if explicitly requested
+        use_sse = "--sse" in sys.argv
+
+        # Override stdio mode if SSE is explicitly requested
+        if use_sse:
+            use_stdio = False
 
         loop = asyncio.get_event_loop()
         if use_stdio:
             logger.info("Using stdio transport for agent communication")
             main_task = asyncio.ensure_future(run_server("stdio"))
         else:
-            logger.info("Using SSE transport")
+            # Default to SSE transport for standalone server mode
+            logger.info("Using SSE transport on port 8080")
             main_task = asyncio.ensure_future(run_server("sse", port=8080))
 
         loop.run_until_complete(main_task)

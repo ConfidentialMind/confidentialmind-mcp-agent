@@ -1,11 +1,10 @@
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import asyncpg
 
 from .connection_manager import ConnectionManager
-from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,13 @@ class QueryValidationError(ValueError):
     pass
 
 
-async def create_pool() -> asyncpg.Pool:
+class DatabaseUnavailableError(DatabaseError):
+    """Exception raised when database connection is not available."""
+
+    pass
+
+
+async def create_pool() -> Optional[asyncpg.Pool]:
     """Creates an asyncpg connection pool with ConfidentialMind support."""
     await ConnectionManager.initialize()
     return await ConnectionManager.create_pool()
@@ -38,12 +43,15 @@ async def create_pool() -> asyncpg.Pool:
 class DatabaseClient:
     """Client for executing read-only PostgreSQL operations."""
 
-    def __init__(self, pool: asyncpg.Pool):
+    def __init__(self, pool: Optional[asyncpg.Pool]):
         """Initialize with a connection pool."""
         self.pool = pool
 
     async def get_table_schemas(self) -> Dict[str, List[Dict[str, Any]]]:
         """Retrieves schema information for tables accessible by the current user."""
+        if self.pool is None:
+            raise DatabaseUnavailableError("Database connection is not available yet")
+
         schemas: Dict[str, List[Dict[str, Any]]] = {}
 
         try:
@@ -97,7 +105,11 @@ class DatabaseClient:
         Raises:
             QueryValidationError: If the query fails validation
             DatabaseError: For other database-related errors
+            DatabaseUnavailableError: If database connection is not available
         """
+        if self.pool is None:
+            raise DatabaseUnavailableError("Database connection is not available yet")
+
         # Validate query starts with allowed keywords
         if not ALLOWED_START_KEYWORDS.match(sql_query):
             raise QueryValidationError("Query must start with SELECT, WITH, or EXPLAIN.")
@@ -124,3 +136,16 @@ class DatabaseClient:
         except Exception as e:
             logger.error(f"Unexpected error executing query: {e}")
             raise DatabaseError(f"Error executing query: {str(e)}")
+
+    async def check_health(self) -> bool:
+        """Check database health by executing a simple query."""
+        if self.pool is None:
+            return False
+
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute("SELECT 1")
+                return True
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return False

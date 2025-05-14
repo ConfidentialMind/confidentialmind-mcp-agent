@@ -1,13 +1,14 @@
 import asyncio
+import datetime
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from confidentialmind_core.config_manager import ConfigManager, ConnectorSchema, load_environment
+from confidentialmind_core.config_manager import load_environment
 from fastmcp import Context, FastMCP
 
 from .connection_manager import ConnectionManager
-from .db import DatabaseClient, create_pool
+from .db import DatabaseClient, DatabaseUnavailableError, create_pool
 from .settings import settings
 
 logger = logging.getLogger(__name__)
@@ -22,38 +23,41 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     state = {}
 
     try:
-        # Initialize ConfidentialMind integration if enabled
-        if settings.use_sdk_connector:
-            load_environment()
-            logger.info("Initializing ConfigManager...")
+        # Initialize environment
+        load_environment()
 
-            try:
-                config_manager = ConfigManager()
-                connectors = [
-                    ConnectorSchema(
-                        type="database",
-                        label="PostgreSQL Database",
-                        config_id=settings.connector_id,
-                    )
-                ]
-                config_manager.init_manager(connectors=connectors)
-                logger.info("ConfigManager initialized successfully")
-            except Exception as e:
-                logger.warning(f"ConfigManager initialization warning: {e}")
-                logger.info("Continuing with fallback settings")
+        # Initialize ConnectionManager (this will handle all connector registration and URL polling)
+        try:
+            # Run with timeout protection
+            await asyncio.wait_for(ConnectionManager.initialize(), timeout=5.0)
+            logger.info("Database connection manager initialized")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "ConnectionManager initialization timed out, continuing without database connection"
+            )
+        except Exception as e:
+            logger.error(f"Error initializing connection manager: {e}")
 
-        # Create the pool using our ConnectionManager
-        pool = await create_pool()
-        state["db_pool"] = pool
-        logger.info("Database pool created and stored in application state")
+        # Create pool, handling failures appropriately
+        try:
+            # Non-blocking pool creation attempt
+            pool = await asyncio.wait_for(create_pool(), timeout=3.0)
+            if pool:
+                state["db_pool"] = pool
+                logger.info("Database pool created and stored in application state")
+            else:
+                logger.info("No database connection available yet. Server will start anyway.")
+                state["db_pool"] = None
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning(f"Starting without database connection: {e}")
+            state["db_pool"] = None
+
+        # Quickly yield control back to FastMCP
         yield state
 
     except (asyncio.CancelledError, KeyboardInterrupt) as e:
         logger.info(f"Server startup interrupted: {type(e).__name__}")
         raise
-    except Exception as e:
-        logger.critical(f"Database connection failed on startup: {e}")
-        yield state
     finally:
         if pool:
             logger.info("Shutting down server, closing database pool")
@@ -81,11 +85,13 @@ async def get_schemas(ctx: Context) -> dict[str, list[dict]]:
     pool = ctx.request_context.lifespan_context.get("db_pool")
     if not pool:
         logger.error("Database pool not available in context.")
-        raise RuntimeError("Database connection is not available.")
+        raise RuntimeError("Database connection is not available yet. Please try again later.")
 
     client = DatabaseClient(pool)
     try:
         return await client.get_table_schemas()
+    except DatabaseUnavailableError:
+        raise RuntimeError("Database connection is not available yet. Please try again later.")
     except Exception as e:
         logger.error(f"Failed to get schemas: {e}")
         raise RuntimeError(f"Could not retrieve database schemas: {e}")
@@ -110,16 +116,43 @@ async def execute_sql(sql_query: str, ctx: Context) -> list[dict]:
     pool = ctx.request_context.lifespan_context.get("db_pool")
     if not pool:
         logger.error("Database pool not available in context for execute_sql.")
-        raise RuntimeError("Database connection is not available.")
+        raise RuntimeError("Database connection is not available yet. Please try again later.")
 
     client = DatabaseClient(pool)
     try:
         results = await client.execute_readonly_query(sql_query)
         await ctx.info(f"Executed query successfully, returned {len(results)} rows.")
         return results
+    except DatabaseUnavailableError:
+        raise RuntimeError("Database connection is not available yet. Please try again later.")
     except ValueError as e:
         logger.warning(f"SQL query validation failed: {e}")
         raise
     except Exception as e:
         logger.error(f"Failed to execute SQL query: {e}")
         raise RuntimeError(f"Could not execute SQL query: {e}")
+
+
+@mcp_server.tool()
+async def health_check(ctx: Context) -> dict:
+    """
+    Returns the health status of the server and database connection.
+    This can be used to check if the server is functioning correctly.
+
+    Returns:
+        A dictionary with health status information.
+    """
+    pool = ctx.request_request.lifespan_context.get("db_pool")
+    db_client = DatabaseClient(pool) if pool else None
+
+    is_db_connected = False
+    if db_client:
+        is_db_connected = await db_client.check_health()
+
+    return {
+        "status": "healthy",
+        "database_connected": is_db_connected,
+        "server_mode": "stack_deployment" if settings.is_stack_deployment else "local",
+        "server_time": datetime.datetime.now().isoformat(),
+        "connector_id": settings.connector_id,
+    }
