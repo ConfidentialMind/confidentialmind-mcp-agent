@@ -1,8 +1,10 @@
+import asyncio
 import logging
 import os
 from pathlib import Path
 from typing import Dict, Literal, Optional
 
+from confidentialmind_core.config_manager import load_environment
 from fastmcp import Client
 from fastmcp.client.transports import PythonStdioTransport, SSETransport
 
@@ -24,6 +26,62 @@ class TransportManager:
         self.mode = mode
         self.transports = {}
         self.clients: Dict[str, Client] = {}
+        self._background_fetch_task = None
+
+        # Load environment variables
+        load_environment()
+        self._is_stack_deployment = (
+            os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
+        )
+
+        logger.info(
+            f"Transport manager initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode"
+        )
+
+    async def _start_background_polling(self):
+        """Start background polling for MCP server URLs if in stack deployment mode."""
+        if self._background_fetch_task is not None and not self._background_fetch_task.done():
+            return  # Already polling
+
+        if self._is_stack_deployment:
+            self._background_fetch_task = asyncio.create_task(
+                self._poll_for_mcp_servers_in_background()
+            )
+
+    async def _poll_for_mcp_servers_in_background(self):
+        """Continuously poll for MCP server URLs and configure transports when available."""
+        connector_manager = ConnectorConfigManager()
+        await connector_manager.initialize(register_connectors=False)
+
+        retry_count = 0
+        max_retry_log = 10  # Log less frequently after this many retries
+        known_servers = set()
+
+        while True:
+            try:
+                servers = await connector_manager.fetch_mcp_servers()
+
+                if servers:
+                    # Check for new servers
+                    for server_id, server_url in servers.items():
+                        if server_id not in known_servers:
+                            logger.info(f"Found new MCP server: {server_id}")
+                            known_servers.add(server_id)
+                            try:
+                                self.configure_transport(server_id, server_url=server_url)
+                                self.create_client(server_id)
+                                logger.info(f"Successfully configured transport for {server_id}")
+                            except Exception as e:
+                                logger.error(f"Error configuring transport for {server_id}: {e}")
+            except Exception as e:
+                # Log less frequently as retries increase
+                if retry_count < max_retry_log or retry_count % 10 == 0:
+                    logger.debug(f"Background polling: Error fetching MCP servers: {e}")
+
+            retry_count += 1
+            # Exponential backoff with a maximum wait time
+            wait_time = min(30, 5 * (1.5 ** min(retry_count, 5)))
+            await asyncio.sleep(wait_time)
 
     def configure_transport(
         self,
@@ -97,6 +155,10 @@ class TransportManager:
         """Configure transports using MCP servers from the stack."""
         connector_manager = ConnectorConfigManager()
         servers = await connector_manager.fetch_mcp_servers()
+
+        # Start background polling for MCP server changes
+        if self._is_stack_deployment and not self._background_fetch_task:
+            await self._start_background_polling()
 
         if not servers:
             logger.warning("No MCP servers found from stack configuration")

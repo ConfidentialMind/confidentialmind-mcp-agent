@@ -31,6 +31,9 @@ class ConnectorConfigManager:
         self.is_stack_deployment = (
             not os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() == "true"
         )
+        logger.info(
+            f"Initializing in {'stack deployment' if self.is_stack_deployment else 'local development'} mode"
+        )
 
     async def initialize(self, register_connectors=True):
         """Initialize connector configuration for the application."""
@@ -79,6 +82,7 @@ class ConnectorConfigManager:
                 )
             except Exception as e:
                 logger.error(f"Error registering connectors: {e}")
+                # Continue without raising - allow app to initialize without connectors
 
         self.initialized = True
         return config_manager
@@ -148,6 +152,9 @@ class ConnectorConfigManager:
     async def _fetch_url_with_polling(self, config_id: str) -> Optional[str]:
         """Poll for URL indefinitely until provided by the stack."""
         logger.info(f"Waiting for {config_id} URL from stack...")
+        retry_count = 0
+        max_retry_log = 10  # Log less frequently after this many retries
+
         while True:
             try:
                 url, _ = get_api_parameters(config_id)
@@ -155,9 +162,14 @@ class ConnectorConfigManager:
                     logger.info(f"Successfully retrieved {config_id} URL from stack: {url}")
                     return url
             except Exception as e:
-                logger.debug(f"Error fetching {config_id} URL, waiting: {e}")
+                # Log less frequently as retries increase
+                if retry_count < max_retry_log or retry_count % 10 == 0:
+                    logger.debug(f"Attempt {retry_count}: Error fetching {config_id} URL: {e}")
 
-            await asyncio.sleep(5)  # Wait before retrying
+            retry_count += 1
+            # Exponential backoff with a maximum wait time
+            wait_time = min(5, 1 * (1.5 ** min(retry_count, 10)))
+            await asyncio.sleep(wait_time)
 
     async def _fetch_mcp_servers_with_polling(self, config_id: str) -> Dict[str, str]:
         """Poll for MCP server URLs indefinitely until provided by the stack."""
@@ -165,8 +177,10 @@ class ConnectorConfigManager:
 
         config_manager = ConfigManager()
         servers = {}
+        retry_count = 0
+        max_retry_log = 10  # Log less frequently after this many retries
 
-        while not servers:
+        while True:
             try:
                 # Get stack IDs from the array connector
                 stack_ids = config_manager.getStackIdForConnector(config_id)
@@ -185,6 +199,18 @@ class ConnectorConfigManager:
                             logger.info(f"Retrieved {len(servers)} MCP server URLs from stack")
                             return servers
             except Exception as e:
-                logger.debug(f"Error fetching MCP server URLs, waiting: {e}")
+                # Log less frequently as retries increase
+                if retry_count < max_retry_log or retry_count % 10 == 0:
+                    logger.debug(f"Attempt {retry_count}: Error fetching MCP server URLs: {e}")
 
-            await asyncio.sleep(5)  # Wait before retrying
+            # Return empty dict if no servers found yet (allows application to start)
+            if retry_count == 0:
+                logger.warning(
+                    "No MCP servers found yet, returning empty list. Will continue polling in background."
+                )
+                return {}
+
+            retry_count += 1
+            # Exponential backoff with a maximum wait time
+            wait_time = min(5, 1 * (1.5 ** min(retry_count, 10)))
+            await asyncio.sleep(wait_time)

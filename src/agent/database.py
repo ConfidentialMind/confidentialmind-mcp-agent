@@ -6,7 +6,7 @@ from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 import backoff
-from confidentialmind_core.config_manager import ConfigManager, get_api_parameters, load_environment
+from confidentialmind_core.config_manager import load_environment
 from pydantic_settings import BaseSettings
 
 from src.agent.connectors import ConnectorConfigManager
@@ -114,6 +114,7 @@ class Database:
         self._reconnect_task: Optional[asyncio.Task] = None
         self._current_db_url: Optional[str] = None
         self._config_id: str = os.environ.get("DB_CONFIG_ID", "DATABASE")
+        self._background_fetch_task: Optional[asyncio.Task] = None
 
         # Load environment variables to set LOCAL_CONFIG flag
         load_environment()
@@ -125,52 +126,45 @@ class Database:
             f"Database initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode"
         )
 
-    async def fetch_db_url(self) -> Optional[str]:
-        """
-        Fetch database URL with infinite polling if in stack deployment mode.
-        Similar to the baserag implementation pattern.
+    async def _start_background_polling(self):
+        """Start background polling for database URL if in stack deployment mode."""
+        if self._background_fetch_task is not None and not self._background_fetch_task.done():
+            return  # Already polling
 
-        Returns:
-            Database URL from the stack or None if in local mode with no URL available
-        """
-        if not self._is_stack_deployment:
-            # In local mode, just get the URL from environment once
-            url, _ = get_api_parameters(self._config_id)
-            if url:
-                logger.info(f"Retrieved database URL from environment: {url}")
-            else:
-                logger.warning(f"No database URL found in environment for {self._config_id}")
-            return url
+        if self._is_stack_deployment:
+            self._background_fetch_task = asyncio.create_task(self._poll_for_url_in_background())
 
-        # In stack deployment mode, poll until URL is available
-        logger.info(f"Waiting for {self._config_id} URL from stack...")
+    async def _poll_for_url_in_background(self):
+        """Continuously poll for database URL and attempt connection when available."""
+        connector_manager = ConnectorConfigManager()
+        await connector_manager.initialize(register_connectors=False)
+
+        retry_count = 0
+        max_retry_log = 10  # Log less frequently after this many retries
+
         while True:
             try:
-                url, _ = get_api_parameters(self._config_id)
-                if url:
-                    logger.info(f"Successfully retrieved {self._config_id} URL from stack")
+                if self.is_connected():
+                    # Already connected, just sleep
+                    await asyncio.sleep(30)
+                    continue
 
-                    # If Confidentialmind SDK provides a full connection string via config manager,
-                    # we get it here; otherwise, we get the base URL to build upon
-                    if self._is_stack_deployment:
-                        # In stack mode, try to get the full connection string from ConfigManager
-                        try:
-                            config_manager = ConfigManager()
-                            full_url = config_manager.config.get_connection_string(url)
-                            if full_url:
-                                logger.info("Got full connection string from ConfigManager")
-                                return full_url
-                        except (AttributeError, Exception) as e:
-                            logger.warning(
-                                f"Could not get connection string from ConfigManager: {e}"
-                            )
-                            # Fall back to using the URL directly if config manager doesn't work
-
-                    return url
+                url = await connector_manager.fetch_database_url(self._config_id)
+                if url and url != self._current_db_url:
+                    logger.info("Found new database URL, attempting connection")
+                    self._current_db_url = url
+                    await self.connect(url)
+                    if self.is_connected():
+                        logger.info("Successfully connected to database in background")
             except Exception as e:
-                logger.debug(f"Error fetching {self._config_id} URL, waiting: {e}")
+                # Log less frequently as retries increase
+                if retry_count < max_retry_log or retry_count % 10 == 0:
+                    logger.debug(f"Background polling: Error connecting to database: {e}")
 
-            await asyncio.sleep(5)  # Wait before retrying
+            retry_count += 1
+            # Exponential backoff with a maximum wait time
+            wait_time = min(30, 5 * (1.5 ** min(retry_count, 5)))
+            await asyncio.sleep(wait_time)
 
     async def connect(self, db_url: Optional[str] = None) -> bool:
         """Establish connection to database with proper locking and stack integration"""
@@ -178,7 +172,7 @@ class Database:
             logger.info("Connection attempt already in progress")
             return self.is_connected()
 
-        if self._pool is not None:
+        if self._pool is not None and self.is_connected():
             return True
 
         self._is_connecting = True
@@ -198,9 +192,24 @@ class Database:
 
                 self._current_db_url = await connector_manager.fetch_database_url(self._config_id)
 
-            if not self._current_db_url and self._is_stack_deployment:
-                logger.error("No database URL available in stack deployment mode")
-                return False
+                # Start background polling for URL changes
+                if self._is_stack_deployment and not self._background_fetch_task:
+                    await self._start_background_polling()
+
+            if not self._current_db_url:
+                if self._is_stack_deployment:
+                    logger.warning(
+                        "No database URL available yet. Agent will run in stateless mode until database is connected."
+                    )
+                    self._connection_error = "No database URL available yet"
+                    return False
+                else:
+                    # In local mode, don't fail but warn
+                    logger.warning(
+                        "No database URL provided in local mode. Agent will run in stateless mode."
+                    )
+                    self._connection_error = "No database URL provided"
+                    return False
 
             # Build connection string and connect
             connection_string = self.settings.get_connection_string(self._current_db_url)
@@ -307,6 +316,10 @@ class Database:
 
     async def load_history(self, session_id: str) -> List[Message]:
         """Load conversation history from the database for a session."""
+        if not self.is_connected():
+            logger.warning("Database not connected. Running in stateless mode.")
+            return []
+
         try:
             await self.ensure_connected()
             results = await self.execute_query(
@@ -323,10 +336,14 @@ class Database:
             return messages
         except Exception as e:
             logger.error(f"Error loading history for session {session_id}: {e}")
-            return []
+            return []  # Return empty history on error
 
     async def save_message(self, session_id: str, message: Message) -> bool:
         """Save a message to the database for a session."""
+        if not self.is_connected():
+            logger.warning("Database not connected. Cannot save message.")
+            return False
+
         try:
             await self.ensure_connected()
             max_order = await self.execute_query(

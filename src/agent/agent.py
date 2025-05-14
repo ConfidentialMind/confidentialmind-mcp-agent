@@ -1,11 +1,13 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
+from confidentialmind_core.config_manager import load_environment
 from fastmcp.exceptions import ClientError
 
 from src.agent.connectors import ConnectorConfigManager
@@ -41,15 +43,28 @@ class Agent:
         self.transport_manager = transport_manager
         self.debug = debug
         self.current_history: List[Message] = []
+        self._has_tools = False
+        self._db_connected = False
+        self._llm_connected = False
 
         if debug:
             logger.setLevel(logging.DEBUG)
 
         self._exit_stack = AsyncExitStack()
 
+        # Check if running in stack deployment mode
+        load_environment()
+        self._is_stack_deployment = (
+            os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
+        )
+
     async def initialize(self) -> bool:
         """Initialize agent components."""
         logger.info("Initializing agent...")
+
+        # Check connection status
+        self._db_connected = self.db.is_connected()
+        self._llm_connected = self.llm.is_connected()
 
         # Check if we're in stack deployment mode
         connector_manager = ConnectorConfigManager()
@@ -64,10 +79,14 @@ class Agent:
 
         # Create all clients (will use whichever transports were configured)
         self.transport_manager.create_all_clients()
+        self._has_tools = len(self.transport_manager.get_all_clients()) > 0
 
         # Log available clients
-        client_info = ", ".join([f"{k}" for k in self.transport_manager.get_all_clients().keys()])
+        clients = self.transport_manager.get_all_clients()
+        client_info = ", ".join([f"{k}" for k in clients.keys()]) if clients else "none"
         logger.info(f"Initialized agent with MCP clients: {client_info}")
+        logger.info(f"Database connected: {self._db_connected}")
+        logger.info(f"LLM connected: {self._llm_connected}")
 
         return True
 
@@ -99,6 +118,20 @@ class Agent:
         """Initialize context by discovering available tools and resources."""
         logger.info("Initializing agent context...")
 
+        # Update status flags
+        self._db_connected = self.db.is_connected()
+        self._llm_connected = self.llm.is_connected()
+
+        # If no clients are available, don't attempt to discover tools
+        clients = self.transport_manager.get_all_clients()
+        if not clients:
+            logger.warning("No MCP clients available, skipping tool discovery")
+            state.execution_context["available_tools"] = []
+            state.execution_context["available_resources"] = []
+            state.execution_context["server_ids"] = []
+            self._has_tools = False
+            return state
+
         try:
             # Initialize containers in execution_context
             state.execution_context["available_tools"] = []
@@ -106,6 +139,7 @@ class Agent:
             state.execution_context["server_ids"] = list(
                 self.transport_manager.get_all_clients().keys()
             )
+            self._has_tools = True
 
             # Discover tools and resources from each client concurrently
             tasks = {}
@@ -584,6 +618,9 @@ class Agent:
         formatted_results = self._format_results(state.mcp_results)
         conversation_context = self._format_conversation_history(self.current_history)
 
+        # Get status information
+        status_info = self._get_connection_status_info()
+
         # Build the response generation prompt
         prompt = f"""
         Generate a comprehensive response to the user's query based on the conversation history and the results of MCP actions.
@@ -599,6 +636,9 @@ class Agent:
         Agent Thought Process:
         {self._format_thoughts(state.thoughts)}
 
+        System Status:
+        {status_info}
+
         Instructions:
         1. Synthesize information from successful MCP actions.
         2. Explain any errors encountered and whether they were resolved.
@@ -606,11 +646,17 @@ class Agent:
         4. Address all parts of the original user query.
         5. Use a helpful and informative tone. Do not just dump raw JSON or technical details.
         6. Provide a clear conclusion or answer to the user's query.
+        7. If the system status indicates missing connections, briefly mention this at the end of your response.
         """
 
         # Call the LLM for response generation
         logger.debug("Sending response generation prompt to LLM.")
         response = await self.llm.generate(prompt)
+
+        # Append status information if necessary
+        if not self._db_connected:
+            response += "\n\n*Note: I'm currently running in stateless mode without access to conversation history storage.*"
+
         state.response = response
         logger.info(f"Final response generated (length: {len(response)} chars).")
 
@@ -622,6 +668,31 @@ class Agent:
         return state
 
     # --- Helper Methods ---
+    def _get_connection_status_info(self) -> str:
+        """Get connection status info for the prompt."""
+        status_lines = []
+
+        if not self._db_connected:
+            status_lines.append(
+                "Database: Not connected. Running in stateless mode without conversation history storage."
+            )
+        else:
+            status_lines.append("Database: Connected. Conversation history is being saved.")
+
+        if not self._llm_connected:
+            status_lines.append("LLM: Not connected. Using fallback response generation.")
+        else:
+            status_lines.append("LLM: Connected. Using full language model capabilities.")
+
+        if not self._has_tools:
+            status_lines.append(
+                "Tools: No tools available. Running in basic Q&A mode without tool access."
+            )
+        else:
+            tools_count = len(self.transport_manager.get_all_clients())
+            status_lines.append(f"Tools: Connected to {tools_count} tool server(s).")
+
+        return "\n".join(status_lines)
 
     def _format_conversation_history(self, history: List[Message]) -> str:
         """Format conversation history for prompts."""
@@ -762,6 +833,10 @@ class Agent:
 
     async def _load_history(self, session_id: str) -> List[Message]:
         """Load conversation history from the database."""
+        if not self._db_connected:
+            logger.warning("Database not connected. Running in stateless mode.")
+            return []
+
         try:
             history = await self.db.load_history(session_id)
             self.current_history = history
@@ -773,7 +848,13 @@ class Agent:
     async def _save_message(self, session_id: str, message: Message) -> bool:
         """Save a message to the database and update in-memory history."""
         try:
-            success = await self.db.save_message(session_id, message)
+            if self._db_connected:
+                success = await self.db.save_message(session_id, message)
+            else:
+                logger.warning("Database not connected. Message not saved to database.")
+                success = False
+
+            # Always update in-memory history regardless of DB connection
             if message not in self.current_history:
                 self.current_history.append(message)
             return success
@@ -800,31 +881,46 @@ class Agent:
         """Execute the complete agent workflow."""
         logger.info(f"Starting agent run for query: '{query[:50]}...'")
 
+        # Update connection status
+        self._db_connected = self.db.is_connected()
+        self._llm_connected = self.llm.is_connected()
+        self._has_tools = len(self.transport_manager.get_all_clients()) > 0
+
         # Generate or use session ID
         definite_session_id = session_id or str(uuid.uuid4())
         logger.info(f"Session ID: {definite_session_id}")
 
-        # Load history
+        # Load history if database is connected
         await self._load_history(definite_session_id)
 
         # Handle management commands
         if query.strip().lower() == "clear history":
-            await self.clear_history(definite_session_id)
-            final_state = AgentState(
-                query=query, session_id=definite_session_id, response="History cleared."
-            )
+            if self._db_connected:
+                await self.db.clear_history(definite_session_id)
+                final_state = AgentState(
+                    query=query, session_id=definite_session_id, response="History cleared."
+                )
+            else:
+                final_state = AgentState(
+                    query=query,
+                    session_id=definite_session_id,
+                    response="I'm running in stateless mode without access to database. No history to clear.",
+                )
             return final_state
 
         if query.strip().lower() == "show history":
             history_text = "History:\n" + (
                 "\n".join(map(str, self.current_history)) if self.current_history else "(empty)"
             )
+            if not self._db_connected:
+                history_text += "\n\n*Note: I'm running in stateless mode without database access. This is the in-memory history for this session only.*"
+
             final_state = AgentState(
                 query=query, session_id=definite_session_id, response=history_text
             )
             return final_state
 
-        # Save user message
+        # Save user message (to memory even if DB not connected)
         user_message = Message(role="user", content=query)
         await self._save_message(definite_session_id, user_message)
 
@@ -832,8 +928,39 @@ class Agent:
         state = AgentState(query=query, session_id=definite_session_id)
 
         try:
+            # If LLM is not connected, return a simple message
+            if not self._llm_connected:
+                state.response = "I'm currently unable to process your request as my language model service is unavailable. Please try again later or contact support."
+                return state
+
             # Execute workflow
             state = await self._initialize_context(state)
+
+            # Skip parsing if there are no available tools
+            if not self._has_tools:
+                # If no tools available, just generate a simple response
+                logger.info("No MCP clients available, skipping parsing and execution")
+                prompt = f"""
+                Answer the user's question as best you can without any external tools.
+                
+                User Query: {query}
+                
+                Conversation History:
+                {self._format_conversation_history(self.current_history)}
+                
+                Note: I currently don't have access to any external tools, so I can only answer based on my general knowledge.
+                """
+
+                state.response = await self.llm.generate(prompt)
+
+                if not self._db_connected:
+                    state.response += "\n\n*Note: I'm currently running in stateless mode without access to conversation history storage.*"
+
+                # Save assistant message
+                assistant_message = Message(role="assistant", content=state.response)
+                await self._save_message(definite_session_id, assistant_message)
+
+                return state
 
             if not state.error:
                 state = await self._parse_query(state)
@@ -861,7 +988,10 @@ class Agent:
         except Exception as e:
             logger.error(f"Error during agent execution: {e}", exc_info=True)
             state.error = f"Agent execution failed: {e}"
-            state.response = "I encountered an error processing your request."
+            state.response = "I encountered an error processing your request. Please try again or contact support if the issue persists."
+
+            if not self._db_connected:
+                state.response += "\n\n*Note: I'm currently running in stateless mode without access to conversation history storage.*"
 
             # Try to save error message to history
             error_message = Message(
