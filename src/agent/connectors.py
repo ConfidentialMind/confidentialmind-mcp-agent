@@ -26,25 +26,34 @@ class ConnectorConfigManager:
     """Manages connector configurations for stack deployment and local development."""
 
     def __init__(self):
+        """Initialize connector configuration manager."""
         self.initialized = False
         load_environment()
         self.is_stack_deployment = (
-            not os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() == "true"
+            os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
         )
         logger.info(
-            f"Initializing in {'stack deployment' if self.is_stack_deployment else 'local development'} mode"
+            f"ConnectorConfigManager: Initializing in {'stack deployment' if self.is_stack_deployment else 'local development'} mode"
         )
+        self._background_tasks = []
 
     async def initialize(self, register_connectors=True):
-        """Initialize connector configuration for the application."""
-        if self.initialized:
-            return
+        """
+        Initialize connector configuration for the application.
 
-        config_manager = ConfigManager()
+        Args:
+            register_connectors: Whether to register connectors with ConfigManager
+        """
+        if self.initialized:
+            logger.debug("ConnectorConfigManager: Already initialized")
+            return
 
         if register_connectors and self.is_stack_deployment:
             # Register connectors with the ConfigManager in stack deployment mode
             try:
+                logger.info("ConnectorConfigManager: Registering connectors with ConfigManager")
+                config_manager = ConfigManager()
+
                 # Register connectors that the agent needs
                 connectors = [
                     # Database connector for session management
@@ -78,54 +87,73 @@ class ConnectorConfigManager:
                 )
 
                 logger.info(
-                    f"Registered {len(connectors)} connectors and {len(array_connectors)} array connectors"
+                    f"ConnectorConfigManager: Registered {len(connectors)} connectors and {len(array_connectors)} array connectors"
                 )
             except Exception as e:
-                logger.error(f"Error registering connectors: {e}")
+                logger.error(f"ConnectorConfigManager: Error registering connectors: {e}")
                 # Continue without raising - allow app to initialize without connectors
 
         self.initialized = True
-        return config_manager
+        return True
 
     async def fetch_database_url(self, config_id: str = "DATABASE") -> Optional[str]:
-        """Fetch database URL using the appropriate method based on deployment mode."""
-        if not self.is_stack_deployment:
-            # Local development mode - use get_api_parameters directly
-            try:
-                url, _ = get_api_parameters(config_id)
-                if url:
-                    logger.info(f"Successfully retrieved database URL from environment: {url}")
-                    return url
-                logger.warning(f"No database URL found in environment for {config_id}")
-                return None
-            except Exception as e:
-                logger.error(f"Error fetching database URL from environment: {e}")
-                return None
-        else:
-            # Stack deployment mode - use infinite polling loop
-            return await self._fetch_url_with_polling(config_id)
+        """
+        Fetch database URL using the appropriate method based on deployment mode.
+
+        Args:
+            config_id: ConfigManager connector ID for the database
+
+        Returns:
+            Database URL or None if not available
+        """
+        try:
+            url, _ = get_api_parameters(config_id)
+            if url:
+                logger.debug(
+                    f"ConnectorConfigManager: Successfully retrieved database URL for {config_id}: {url}"
+                )
+                return url
+            logger.debug(f"ConnectorConfigManager: No database URL found for {config_id}")
+            return None
+        except Exception as e:
+            logger.error(
+                f"ConnectorConfigManager: Error fetching database URL for {config_id}: {e}"
+            )
+            return None
 
     async def fetch_llm_url(self, config_id: str = "LLM") -> Tuple[Optional[str], Optional[Dict]]:
-        """Fetch LLM URL and headers using the appropriate method based on deployment mode."""
-        if not self.is_stack_deployment:
-            # Local development mode - use get_api_parameters directly
-            try:
-                url, headers = get_api_parameters(config_id)
-                if url:
-                    logger.info(f"Successfully retrieved LLM URL from environment: {url}")
-                    return url, headers
-                logger.warning(f"No LLM URL found in environment for {config_id}")
-                return None, None
-            except Exception as e:
-                logger.error(f"Error fetching LLM URL from environment: {e}")
-                return None, None
-        else:
-            # Stack deployment mode - use infinite polling loop
-            url = await self._fetch_url_with_polling(config_id)
-            return url, {}  # In stack mode, headers are handled differently
+        """
+        Fetch LLM URL and headers using the appropriate method based on deployment mode.
 
-    async def fetch_mcp_servers(self, config_id: str = "MCP_SERVERS") -> Dict[str, str]:
-        """Fetch MCP server URLs from stack or environment."""
+        Args:
+            config_id: ConfigManager connector ID for the LLM
+
+        Returns:
+            Tuple of (URL, headers) or (None, None) if not available
+        """
+        try:
+            url, headers = get_api_parameters(config_id)
+            if url:
+                logger.debug(
+                    f"ConnectorConfigManager: Successfully retrieved LLM URL for {config_id}: {url}"
+                )
+                return url, headers
+            logger.debug(f"ConnectorConfigManager: No LLM URL found for {config_id}")
+            return None, None
+        except Exception as e:
+            logger.error(f"ConnectorConfigManager: Error fetching LLM URL for {config_id}: {e}")
+            return None, None
+
+    async def fetch_mcp_servers(self, config_id: str = "agentTools") -> Dict[str, str]:
+        """
+        Fetch MCP server URLs from stack or environment.
+
+        Args:
+            config_id: ConfigManager connector ID for the MCP servers
+
+        Returns:
+            Dictionary mapping server_id to server_url
+        """
         if not self.is_stack_deployment:
             # Local development mode - collect from environment variables
             servers = {}
@@ -142,75 +170,42 @@ class ConnectorConfigManager:
                 servers["agenttools"] = default_mcp
 
             if not servers:
-                logger.warning("No MCP servers found in environment variables")
+                logger.warning(
+                    "ConnectorConfigManager: No MCP servers found in environment variables"
+                )
 
             return servers
         else:
             # Stack deployment mode - get from ArrayConnectorSchema
-            return await self._fetch_mcp_servers_with_polling(config_id)
-
-    async def _fetch_url_with_polling(self, config_id: str) -> Optional[str]:
-        """Poll for URL indefinitely until provided by the stack."""
-        logger.info(f"Waiting for {config_id} URL from stack...")
-        retry_count = 0
-        max_retry_log = 10  # Log less frequently after this many retries
-
-        while True:
             try:
-                url, _ = get_api_parameters(config_id)
-                if url:
-                    logger.info(f"Successfully retrieved {config_id} URL from stack: {url}")
-                    return url
-            except Exception as e:
-                # Log less frequently as retries increase
-                if retry_count < max_retry_log or retry_count % 10 == 0:
-                    logger.debug(f"Attempt {retry_count}: Error fetching {config_id} URL: {e}")
+                config_manager = ConfigManager()
 
-            retry_count += 1
-            # Exponential backoff with a maximum wait time
-            wait_time = min(5, 1 * (1.5 ** min(retry_count, 10)))
-            await asyncio.sleep(wait_time)
-
-    async def _fetch_mcp_servers_with_polling(self, config_id: str) -> Dict[str, str]:
-        """Poll for MCP server URLs indefinitely until provided by the stack."""
-        logger.info(f"Waiting for {config_id} URLs from stack...")
-
-        config_manager = ConfigManager()
-        servers = {}
-        retry_count = 0
-        max_retry_log = 10  # Log less frequently after this many retries
-
-        while True:
-            try:
                 # Get stack IDs from the array connector
                 stack_ids = config_manager.getStackIdForConnector(config_id)
+                if not stack_ids or not isinstance(stack_ids, list) or len(stack_ids) == 0:
+                    logger.warning(f"ConnectorConfigManager: No stack IDs found for {config_id}")
+                    return {}
 
-                if stack_ids and isinstance(stack_ids, list) and len(stack_ids) > 0:
-                    # Get URLs for each stack ID
-                    urls = config_manager.getUrlForConnector(config_id)
+                # Get URLs for each stack ID
+                urls = config_manager.getUrlForConnector(config_id)
+                if not urls or not isinstance(urls, list) or len(urls) == 0:
+                    logger.warning(f"ConnectorConfigManager: No URLs found for {config_id}")
+                    return {}
 
-                    if urls and isinstance(urls, list):
-                        # Create a dictionary of server_id -> url
-                        for i, stack_id in enumerate(stack_ids):
-                            if i < len(urls):
-                                servers[stack_id.lower()] = urls[i]
+                # Create a dictionary of server_id -> url
+                servers = {}
+                for i, stack_id in enumerate(stack_ids):
+                    if i < len(urls):
+                        servers[stack_id.lower()] = urls[i]
 
-                        if servers:
-                            logger.info(f"Retrieved {len(servers)} MCP server URLs from stack")
-                            return servers
+                if servers:
+                    logger.info(
+                        f"ConnectorConfigManager: Retrieved {len(servers)} MCP server URLs from stack"
+                    )
+                    return servers
+                else:
+                    logger.warning(f"ConnectorConfigManager: No MCP servers found for {config_id}")
+                    return {}
             except Exception as e:
-                # Log less frequently as retries increase
-                if retry_count < max_retry_log or retry_count % 10 == 0:
-                    logger.debug(f"Attempt {retry_count}: Error fetching MCP server URLs: {e}")
-
-            # Return empty dict if no servers found yet (allows application to start)
-            if retry_count == 0:
-                logger.warning(
-                    "No MCP servers found yet, returning empty list. Will continue polling in background."
-                )
+                logger.error(f"ConnectorConfigManager: Error fetching MCP servers: {e}")
                 return {}
-
-            retry_count += 1
-            # Exponential backoff with a maximum wait time
-            wait_time = min(5, 1 * (1.5 ** min(retry_count, 10)))
-            await asyncio.sleep(wait_time)

@@ -8,7 +8,12 @@ from confidentialmind_core.config_manager import load_environment
 from fastmcp import Context, FastMCP
 
 from .connection_manager import ConnectionManager
-from .db import DatabaseClient, DatabaseUnavailableError, create_pool
+from .db import (
+    DatabaseClient,
+    DatabaseUnavailableError,
+    QueryValidationError,
+    create_pool,
+)
 from .settings import settings
 
 logger = logging.getLogger(__name__)
@@ -18,9 +23,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
     Handles database pool setup and teardown with ConfidentialMind support.
+
+    This function allows the server to start without a database connection,
+    which is required for stack deployment scenarios where the database
+    might be connected after the server is running.
     """
     pool = None
-    state = {}
+    state = {"db_pool": None}
 
     try:
         # Initialize environment
@@ -125,7 +134,7 @@ async def execute_sql(sql_query: str, ctx: Context) -> list[dict]:
         return results
     except DatabaseUnavailableError:
         raise RuntimeError("Database connection is not available yet. Please try again later.")
-    except ValueError as e:
+    except QueryValidationError as e:
         logger.warning(f"SQL query validation failed: {e}")
         raise
     except Exception as e:
@@ -142,16 +151,22 @@ async def health_check(ctx: Context) -> dict:
     Returns:
         A dictionary with health status information.
     """
-    pool = ctx.request_request.lifespan_context.get("db_pool")
+    pool = ctx.request_context.lifespan_context.get("db_pool")
     db_client = DatabaseClient(pool) if pool else None
 
     is_db_connected = False
+    db_error = None
+
     if db_client:
         is_db_connected = await db_client.check_health()
+    else:
+        db_error = ConnectionManager.last_error() or "Database not configured"
 
+    # Get information from the connection manager for more details
     return {
         "status": "healthy",
         "database_connected": is_db_connected,
+        "database_error": db_error if not is_db_connected else None,
         "server_mode": "stack_deployment" if settings.is_stack_deployment else "local",
         "server_time": datetime.datetime.now().isoformat(),
         "connector_id": settings.connector_id,

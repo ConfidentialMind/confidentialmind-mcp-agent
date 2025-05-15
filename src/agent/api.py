@@ -1,5 +1,3 @@
-"""OpenAI API-compatible endpoint for the FastMCP agent."""
-
 import logging
 import os
 import uuid
@@ -71,6 +69,7 @@ class AgentComponents:
     """Shared agent components for API endpoints"""
 
     def __init__(self):
+        """Initialize shared components"""
         self.database: Optional[Database] = None
         self.llm_connector: Optional[LLMConnector] = None
         self.transport_manager: Optional[TransportManager] = None
@@ -79,21 +78,45 @@ class AgentComponents:
         self.initialized = False
         self.db_config_id = os.environ.get("DB_CONFIG_ID", "DATABASE")
         self.llm_config_id = os.environ.get("LLM_CONFIG_ID", "LLM")
+        self.mcp_config_id = os.environ.get("MCP_CONFIG_ID", "agentTools")
 
-        # Get MCP server URLs from environment with a default
-        default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/sse")
-        self.mcp_servers = {"agentTools": default_mcp_server}
+        # Determine if running in stack deployment mode
+        load_environment()
+        self.is_stack_deployment = (
+            os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
+        )
 
-        # Check if there are any additional MCP servers specified in the format MCP_SERVER_NAME=url
-        for key, value in os.environ.items():
-            if key.startswith("MCP_SERVER_") and value:
-                server_name = key[11:].lower()  # Remove "MCP_SERVER_" prefix and lowercase
-                if server_name and value:
-                    self.mcp_servers[server_name] = value
+        logger.info(
+            f"AgentComponents: Initializing in {'stack deployment' if self.is_stack_deployment else 'local config'} mode"
+        )
+
+        # For local development, get MCP server URLs from environment
+        if not self.is_stack_deployment:
+            # Get MCP server URLs from environment with a default
+            default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/sse")
+            self.mcp_servers = {"agentTools": default_mcp_server}
+
+            # Check for additional MCP servers specified as MCP_SERVER_NAME=url
+            for key, value in os.environ.items():
+                if key.startswith("MCP_SERVER_") and value:
+                    server_name = key[11:].lower()  # Remove "MCP_SERVER_" prefix and lowercase
+                    if server_name and value:
+                        self.mcp_servers[server_name] = value
+
+            logger.info(
+                f"AgentComponents: Found {len(self.mcp_servers)} MCP servers in environment"
+            )
 
     async def initialize(self):
-        """Initialize agent components"""
+        """
+        Initialize agent components
+
+        This method supports both stack deployment and local development modes.
+        In stack deployment mode, it will not fail if connectors are not available,
+        allowing the API to start and waiting for connectors to be configured.
+        """
         if self.initialized:
+            logger.debug("AgentComponents: Already initialized")
             return True
 
         try:
@@ -105,47 +128,70 @@ class AgentComponents:
             db_url = await connector_manager.fetch_database_url(self.db_config_id)
             db_settings = DatabaseSettings()
             self.database = Database(db_settings)
-            success = await self.database.connect(db_url)
-            if not success:
-                logger.error("Failed to connect to database")
-                return False
+            if db_url:
+                success = await self.database.connect(db_url)
+                if not success:
+                    logger.warning(
+                        "AgentComponents: Failed to connect to database, continuing without it"
+                    )
+            else:
+                logger.warning(
+                    "AgentComponents: No database URL available, continuing without database connection"
+                )
 
-            # Initialize schema
-            success = await self.database.ensure_schema()
-            if not success:
-                logger.warning("Could not ensure database schema. Some operations might fail.")
+            # Initialize schema if database is connected
+            if self.database.is_connected():
+                success = await self.database.ensure_schema()
+                if not success:
+                    logger.warning(
+                        "AgentComponents: Could not ensure database schema. Some operations might fail."
+                    )
+            else:
+                logger.info(
+                    "AgentComponents: Database not connected, skipping schema initialization"
+                )
 
             # Initialize LLM connector
             self.llm_connector = LLMConnector(self.llm_config_id)
             success = await self.llm_connector.initialize()
             if not success:
-                logger.error("Failed to initialize LLM connector")
-                return False
+                logger.warning(
+                    "AgentComponents: Failed to initialize LLM connector, continuing without it"
+                )
 
             # Initialize transport manager for API mode
             self.transport_manager = TransportManager(mode="api")
 
-            if connector_manager.is_stack_deployment:
-                # Get MCP servers from stack
+            if self.is_stack_deployment:
+                # Get MCP servers from stack (this also starts background polling)
                 await self.transport_manager.configure_from_stack()
-
+                logger.info("AgentComponents: Configured MCP servers from stack")
             else:
-                # Configure transports
+                # Configure transports from environment
                 for server_id, server_url in self.mcp_servers.items():
                     try:
                         self.transport_manager.configure_transport(server_id, server_url=server_url)
+                        logger.info(
+                            f"AgentComponents: Configured transport for {server_id}: {server_url}"
+                        )
                     except Exception as e:
-                        logger.error(f"Error configuring transport for {server_id}: {e}")
-                        return False
+                        logger.error(
+                            f"AgentComponents: Error configuring transport for {server_id}: {e}"
+                        )
 
             # Create all clients
             self.transport_manager.create_all_clients()
+
+            # Log available clients
+            clients = self.transport_manager.get_all_clients()
+            client_info = ", ".join([f"{k}" for k in clients.keys()]) if clients else "none"
+            logger.info(f"AgentComponents: Initialized with MCP clients: {client_info}")
 
             self.initialized = True
             return True
 
         except Exception as e:
-            logger.error(f"Error initializing agent components: {e}", exc_info=True)
+            logger.error(f"AgentComponents: Error initializing components: {e}", exc_info=True)
             # Clean up any potentially partially initialized resources
             await self.cleanup()
             return False
@@ -164,7 +210,7 @@ class AgentComponents:
             await self.exit_stack.aclose()
             self.initialized = False
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}", exc_info=True)
+            logger.error(f"AgentComponents: Error during cleanup: {e}", exc_info=True)
 
 
 # Create FastAPI app and shared components
@@ -191,9 +237,8 @@ async def get_components():
     if not components.initialized:
         success = await components.initialize()
         if not success:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Failed to initialize agent components",
+            logger.warning(
+                "AgentComponents: Failed to initialize components, but will continue anyway"
             )
     return components
 
@@ -295,8 +340,35 @@ async def create_chat_completion(
 
 @app.get("/health")
 async def health_check(components: AgentComponents = Depends(get_components)):
-    """Health check endpoint."""
-    return {"status": "healthy", "database": components.database.is_connected()}
+    """
+    Health check endpoint.
+
+    Returns information about the agent's components and their connection status.
+    """
+    status = {
+        "status": "healthy",
+        "deployment_mode": "stack" if components.is_stack_deployment else "local",
+        "database": {
+            "connected": components.database.is_connected() if components.database else False,
+            "error": components.database.last_error() if components.database else "Not initialized",
+        },
+        "llm": {
+            "connected": components.llm_connector.is_connected()
+            if components.llm_connector
+            else False,
+        },
+        "mcp_servers": {
+            "count": len(components.transport_manager.get_all_clients())
+            if components.transport_manager
+            else 0,
+            "servers": list(components.transport_manager.get_all_clients().keys())
+            if components.transport_manager
+            else [],
+        },
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    return status
 
 
 @app.on_event("startup")
@@ -316,7 +388,7 @@ async def shutdown_event():
 def start_api_server(host: str = "0.0.0.0", port: int = 8000, log_level: str = "info"):
     """Start the API server."""
     uvicorn.run(
-        "agent.api:app",
+        "src.agent.api:app",
         host=host,
         port=port,
         log_level=log_level,

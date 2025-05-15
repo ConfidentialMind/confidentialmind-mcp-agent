@@ -35,10 +35,15 @@ class ConnectionManager:
     _connector_manager: Optional[PostgresConnectorManager] = None
     _is_stack_deployment: bool = False
     _background_poll_task: Optional[asyncio.Task] = None
+    _initialized: bool = False
 
     @classmethod
     async def initialize(cls) -> bool:
         """Initialize connection manager and discover URLs if needed."""
+        if cls._initialized:
+            logger.debug("ConnectionManager: Already initialized")
+            return True
+
         # Determine deployment mode
         load_environment()
         cls._is_stack_deployment = (
@@ -51,20 +56,27 @@ class ConnectionManager:
 
         # Initialize the connector manager
         cls._connector_manager = PostgresConnectorManager(settings.connector_id)
-        await cls._connector_manager.initialize(register_connectors=True)
+        try:
+            # Always register connectors in stack mode, but make it optional in local mode
+            register_connectors = cls._is_stack_deployment
+            await cls._connector_manager.initialize(register_connectors=register_connectors)
 
-        # Try to get a URL initially
-        cls._current_url = await cls._connector_manager.fetch_database_url()
-        if cls._current_url:
-            logger.info(f"ConnectionManager: Initial URL available: {cls._current_url}")
-        else:
-            logger.info("ConnectionManager: No initial URL available")
+            # Try to get a URL initially
+            cls._current_url = await cls._connector_manager.fetch_database_url()
+            if cls._current_url:
+                logger.info(f"ConnectionManager: Initial URL available: {cls._current_url}")
+            else:
+                logger.info("ConnectionManager: No initial URL available")
 
-        # Start background polling for URL changes in stack mode
-        if cls._is_stack_deployment:
-            await cls._start_background_polling()
+            # Start background polling for URL changes in stack mode
+            if cls._is_stack_deployment:
+                await cls._start_background_polling()
 
-        return True
+            cls._initialized = True
+            return True
+        except Exception as e:
+            logger.error(f"ConnectionManager: Error during initialization: {e}")
+            return False
 
     @classmethod
     async def _start_background_polling(cls):
@@ -89,9 +101,9 @@ class ConnectionManager:
                 # Log at appropriate intervals
                 if retry_count < max_retry_log or retry_count % 10 == 0:
                     if url:
-                        logger.info(f"ConnectionManager: Poll {retry_count}: Found URL {url}")
+                        logger.debug(f"ConnectionManager: Poll {retry_count}: Found URL {url}")
                     else:
-                        logger.info(f"ConnectionManager: Poll {retry_count}: No URL available")
+                        logger.debug(f"ConnectionManager: Poll {retry_count}: No URL available")
 
                 # Handle URL changes
                 if url and url != cls._current_url:
@@ -116,6 +128,7 @@ class ConnectionManager:
 
             # Increment and wait
             retry_count += 1
+            # Exponential backoff with a maximum wait time
             wait_time = min(30, 5 * (1.5 ** min(retry_count, 5)))
             await asyncio.sleep(wait_time)
 
@@ -147,6 +160,7 @@ class ConnectionManager:
                     "ConnectionManager: No database URL available yet in stack deployment mode"
                 )
                 cls._connection_error = "No database URL available yet"
+                cls._is_connecting = False
                 return None
 
             # Get connection string using the URL
@@ -157,7 +171,15 @@ class ConnectionManager:
 
             # Create the pool
             cls._pool = await asyncpg.create_pool(
-                dsn=connection_string, min_size=1, max_size=5, command_timeout=60.0
+                dsn=connection_string,
+                min_size=1,
+                max_size=5,
+                command_timeout=60.0,
+                server_settings={
+                    "statement_timeout": "10000",  # 10 seconds
+                    "idle_in_transaction_session_timeout": "10000",  # 10 seconds
+                    "lock_timeout": "2000",  # 2 seconds
+                },
             )
 
             if not cls._pool:
@@ -182,6 +204,7 @@ class ConnectionManager:
                 logger.warning(
                     "ConnectionManager: Continuing without database connection in stack deployment mode"
                 )
+                cls._is_connecting = False
                 return None
 
             raise ConnectionError(f"Failed to connect to database: {e}")

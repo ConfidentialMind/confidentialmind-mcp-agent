@@ -12,9 +12,6 @@ class PostgresSettings(BaseSettings):
 
     host: str = Field(default="localhost")
     port: int = Field(default=5432)
-    # user: str = Field(default="postgres")
-    # password: str = Field(default="postgres")
-    # database: str = Field(default="test_db")
     user: str = Field(default="app")
     password: str = Field(default="testpass")
     database: str = Field(default="vector-db")
@@ -39,7 +36,15 @@ class PostgresSettings(BaseSettings):
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
 
     def get_connection_string(self, sdk_url: Optional[str] = None) -> str:
-        """Generate connection string with optional SDK URL incorporation, matching agent approach."""
+        """
+        Generate connection string with optional SDK URL incorporation.
+
+        Args:
+            sdk_url: Optional URL provided by the SDK
+
+        Returns:
+            PostgreSQL connection string
+        """
         # If DSN is explicitly set, use it over everything else
         if self.dsn:
             return self.dsn
@@ -55,14 +60,12 @@ class PostgresSettings(BaseSettings):
             host_part = f"{self.host}:{self.port}"
             return f"postgresql://{self.user}:{self.password}@{host_part}/{self.database}"
         else:
-            # Stack deployment mode - use the URL as the endpoint without default credentials
-            # The SDK URL in stack mode is expected to be the hostname with correct credentials
-            # coming from database authentication
+            # Stack deployment mode - use the URL as the endpoint
+            # with credentials from settings
             if not sdk_url:
                 raise ValueError("No database URL provided in stack deployment mode")
 
-            # In stack deployment, we only use the hostname/port from SDK URL
-            # and don't append our default credentials
+            # In stack deployment, use the URL as the hostname/port
             return f"postgresql://{self.user}:{self.password}@{sdk_url}/{self.database}"
 
 

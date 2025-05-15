@@ -22,7 +22,7 @@ def get_backoff_config() -> Dict[str, Any]:
         "max_tries": 5,
         "max_time": 30,  # Maximum time to spend on backoff retries (seconds)
         "on_backoff": lambda details: logger.info(
-            f"Reconnection attempt {details['tries']} failed. Retrying in {details['wait']} seconds..."
+            f"Database reconnection attempt {details['tries']} failed. Retrying in {details['wait']} seconds..."
         ),
     }
 
@@ -46,6 +46,7 @@ class DatabaseSettings(BaseSettings):
     def get_connection_string(self, db_url: Optional[str] = None) -> str:
         """
         Generate PostgreSQL connection string.
+
         Args:
             db_url: Optional database URL from SDK. If provided, it's used for the host part.
 
@@ -73,13 +74,12 @@ class DatabaseSettings(BaseSettings):
             # Construct DSN using potentially overridden user/pass/db from BaseSettings
             dsn = f"postgresql://{self.database_user}:{self.database_password}@{host_part}/{self.database_name}"
         else:
-            # Stack deployment mode - use the full DSN from the stack without modifications
-            # Note: db_url in this context is expected to be the full DSN
+            # Stack deployment mode - use the hostname from stack with credentials from settings
             if not db_url:
                 raise ValueError("No database URL provided in stack deployment mode")
 
             dsn = f"postgresql://{self.database_user}:{self.database_password}@{db_url}/{self.database_name}"
-            logger.info("Using the complete DSN from the stack configuration")
+            logger.info("Using stack configuration with settings credentials")
 
         logger.info(f"Constructed DSN: {self._get_safe_connection_string(dsn)}")
         return dsn
@@ -123,15 +123,17 @@ class Database:
         )
 
         logger.info(
-            f"Database initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode"
+            f"Database: Initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode"
         )
 
     async def _start_background_polling(self):
         """Start background polling for database URL if in stack deployment mode."""
         if self._background_fetch_task is not None and not self._background_fetch_task.done():
+            logger.info("Database: Background polling already started")
             return  # Already polling
 
         if self._is_stack_deployment:
+            logger.info("Database: Starting background polling for URL changes")
             self._background_fetch_task = asyncio.create_task(self._poll_for_url_in_background())
 
     async def _poll_for_url_in_background(self):
@@ -150,16 +152,24 @@ class Database:
                     continue
 
                 url = await connector_manager.fetch_database_url(self._config_id)
+
+                # Only log at appropriate intervals
+                if retry_count < max_retry_log or retry_count % 10 == 0:
+                    if url:
+                        logger.debug(f"Database: Poll {retry_count}: Found URL {url}")
+                    else:
+                        logger.debug(f"Database: Poll {retry_count}: No URL available")
+
                 if url and url != self._current_db_url:
-                    logger.info("Found new database URL, attempting connection")
+                    logger.info("Database: Found new database URL, attempting connection")
                     self._current_db_url = url
                     await self.connect(url)
                     if self.is_connected():
-                        logger.info("Successfully connected to database in background")
+                        logger.info("Database: Successfully connected in background")
             except Exception as e:
                 # Log less frequently as retries increase
                 if retry_count < max_retry_log or retry_count % 10 == 0:
-                    logger.debug(f"Background polling: Error connecting to database: {e}")
+                    logger.error(f"Database: Error in background polling: {e}")
 
             retry_count += 1
             # Exponential backoff with a maximum wait time
@@ -167,9 +177,20 @@ class Database:
             await asyncio.sleep(wait_time)
 
     async def connect(self, db_url: Optional[str] = None) -> bool:
-        """Establish connection to database with proper locking and stack integration"""
+        """
+        Establish connection to database with proper locking and stack integration.
+
+        This method handles both local and stack deployment modes, and won't raise exceptions
+        if the database is not available in stack deployment mode.
+
+        Args:
+            db_url: Optional database URL override
+
+        Returns:
+            True if connection was successful, False otherwise
+        """
         if self._is_connecting:
-            logger.info("Connection attempt already in progress")
+            logger.info("Database: Connection attempt already in progress")
             return self.is_connected()
 
         if self._pool is not None and self.is_connected():
@@ -199,23 +220,25 @@ class Database:
             if not self._current_db_url:
                 if self._is_stack_deployment:
                     logger.warning(
-                        "No database URL available yet. Agent will run in stateless mode until database is connected."
+                        "Database: No URL available yet. Agent will run in stateless mode until database is connected."
                     )
                     self._connection_error = "No database URL available yet"
+                    self._is_connecting = False
                     return False
                 else:
                     # In local mode, don't fail but warn
                     logger.warning(
-                        "No database URL provided in local mode. Agent will run in stateless mode."
+                        "Database: No URL provided in local mode. Agent will run in stateless mode."
                     )
                     self._connection_error = "No database URL provided"
+                    self._is_connecting = False
                     return False
 
             # Build connection string and connect
             connection_string = self.settings.get_connection_string(self._current_db_url)
 
             logger.info(
-                f"Connecting to database with connection string: {self.settings._get_safe_connection_string(connection_string)}"
+                f"Database: Connecting with connection string: {self.settings._get_safe_connection_string(connection_string)}"
             )
 
             self._pool = await asyncpg.create_pool(
@@ -235,13 +258,13 @@ class Database:
             async with self._pool.acquire() as conn:
                 await conn.execute("SELECT 1")
 
-            logger.info("Successfully connected to database")
+            logger.info("Database: Connected successfully")
             self._connection_error = None
             return True
 
         except Exception as e:
             self._connection_error = f"Failed to connect to database: {str(e)}"
-            logger.error(self._connection_error)
+            logger.error(f"Database: Connection error: {e}")
             self._pool = None
             self._schedule_reconnect()
             return False
@@ -249,14 +272,24 @@ class Database:
             self._is_connecting = False
 
     async def disconnect(self):
-        """Disconnect from database"""
+        """Disconnect from database and clean up resources"""
         if self._pool:
-            logger.info("Disconnecting from database")
+            logger.info("Database: Disconnecting")
             if self._reconnect_task and not self._reconnect_task.done():
                 self._reconnect_task.cancel()
             await self._pool.close()
             self._pool = None
-            logger.info("Successfully disconnected database connections")
+            logger.info("Database: Disconnected successfully")
+
+        # Cancel background polling task
+        if self._background_fetch_task and not self._background_fetch_task.done():
+            logger.info("Database: Cancelling background polling task")
+            self._background_fetch_task.cancel()
+            try:
+                await self._background_fetch_task
+            except asyncio.CancelledError:
+                pass
+            self._background_fetch_task = None
 
     def is_connected(self) -> bool:
         """Check if database is currently connected"""
@@ -274,7 +307,11 @@ class Database:
     @backoff.on_exception(backoff.expo, Exception, **get_backoff_config())
     async def _reconnect_with_backoff(self):
         """Attempt to reconnect with exponential backoff"""
-        await self.connect(self._current_db_url)
+        try:
+            await self.connect(self._current_db_url)
+        except Exception as e:
+            logger.error(f"Database: Reconnection failed: {e}")
+            raise
 
     async def ensure_connected(self):
         """Ensure database is connected, waiting for reconnection if necessary"""
@@ -309,15 +346,20 @@ class Database:
                 else:
                     raise ValueError(f"Unknown fetch_type: {fetch_type}")
             except Exception as e:
-                logger.error(f"Error executing query: {e}")
+                logger.error(f"Database: Error executing query: {e}")
                 raise
 
     # Session history methods
 
     async def load_history(self, session_id: str) -> List[Message]:
-        """Load conversation history from the database for a session."""
+        """
+        Load conversation history from the database for a session.
+
+        If the database is not connected, returns an empty list,
+        allowing the agent to operate in stateless mode.
+        """
         if not self.is_connected():
-            logger.warning("Database not connected. Running in stateless mode.")
+            logger.warning("Database: Not connected. Running in stateless mode.")
             return []
 
         try:
@@ -332,16 +374,20 @@ class Database:
                 session_id,
             )
             messages = [Message(role=row["role"], content=row["content"]) for row in results]
-            logger.debug(f"Loaded {len(messages)} messages for session {session_id}")
+            logger.debug(f"Database: Loaded {len(messages)} messages for session {session_id}")
             return messages
         except Exception as e:
-            logger.error(f"Error loading history for session {session_id}: {e}")
+            logger.error(f"Database: Error loading history for session {session_id}: {e}")
             return []  # Return empty history on error
 
     async def save_message(self, session_id: str, message: Message) -> bool:
-        """Save a message to the database for a session."""
+        """
+        Save a message to the database for a session.
+
+        If the database is not connected, returns False but doesn't raise an exception.
+        """
         if not self.is_connected():
-            logger.warning("Database not connected. Cannot save message.")
+            logger.warning("Database: Not connected. Cannot save message.")
             return False
 
         try:
@@ -364,17 +410,27 @@ class Database:
                 message.content,
                 fetch_type="none",
             )
-            logger.debug(f"Saved message for session {session_id} order {message_order}")
+            logger.debug(f"Database: Saved message for session {session_id} order {message_order}")
             return True
         except Exception as e:
             if not self.is_connected():
-                logger.warning(f"DB not connected saving msg for {session_id}: {self.last_error()}")
+                logger.warning(
+                    f"Database: Not connected while saving msg for {session_id}: {self.last_error()}"
+                )
             else:
-                logger.error(f"Error saving message for session {session_id}: {e}")
+                logger.error(f"Database: Error saving message for session {session_id}: {e}")
             return False
 
     async def clear_history(self, session_id: str) -> bool:
-        """Clear the conversation history for a session in the database."""
+        """
+        Clear the conversation history for a session in the database.
+
+        If the database is not connected, returns False but doesn't raise an exception.
+        """
+        if not self.is_connected():
+            logger.warning("Database: Not connected. Cannot clear history.")
+            return False
+
         try:
             await self.ensure_connected()
             await self.execute_query(
@@ -382,14 +438,22 @@ class Database:
                 session_id,
                 fetch_type="none",
             )
-            logger.info(f"Cleared conversation history for session {session_id}")
+            logger.info(f"Database: Cleared conversation history for session {session_id}")
             return True
         except Exception as e:
-            logger.error(f"Error clearing history for session {session_id}: {e}")
+            logger.error(f"Database: Error clearing history for session {session_id}: {e}")
             return False
 
     async def ensure_schema(self) -> bool:
-        """Ensure necessary database tables exist"""
+        """
+        Ensure necessary database tables exist
+
+        If the database is not connected, returns False but doesn't raise an exception.
+        """
+        if not self.is_connected():
+            logger.warning("Database: Not connected. Cannot ensure schema.")
+            return False
+
         try:
             await self.ensure_connected()
 
@@ -420,7 +484,7 @@ class Database:
                     """,
                     fetch_type="none",
                 )
-                logger.info("Created conversation_messages table and indices")
+                logger.info("Database: Created conversation_messages table and indices")
                 return True
             else:  # validate table structure
                 expected_columns = {
@@ -454,7 +518,7 @@ class Database:
                 missing_columns = set(expected_columns.keys()) - set(actual_columns.keys())
                 if missing_columns:
                     logger.error(
-                        f"Missing columns in conversation_messages table: {missing_columns}"
+                        f"Database: Missing columns in conversation_messages table: {missing_columns}"
                     )
                     return False
 
@@ -467,7 +531,7 @@ class Database:
                             or expected_props["is_nullable"] != actual_props["is_nullable"]
                         ):
                             logger.error(
-                                f"Column {col_name} has incorrect properties. Expected: {expected_props}, Actual: {actual_props}"
+                                f"Database: Column {col_name} has incorrect properties. Expected: {expected_props}, Actual: {actual_props}"
                             )
                             return False
 
@@ -508,13 +572,13 @@ class Database:
                                 """,
                                 fetch_type="none",
                             )
-                    logger.info(f"Created missing indices: {missing_indices}")
+                    logger.info(f"Database: Created missing indices: {missing_indices}")
 
-                logger.info("Validated conversation_messages table structure")
+                logger.info("Database: Validated conversation_messages table structure")
                 return True
 
         except Exception as e:
-            logger.error(f"Error ensuring schema: {e}")
+            logger.error(f"Database: Error ensuring schema: {e}")
             return False
 
 

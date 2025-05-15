@@ -42,7 +42,13 @@ def signal_handler(sig, frame):
 
 
 async def run_server(transport_type, **kwargs):
-    """Run the MCP server with shutdown handling and proactive initialization."""
+    """
+    Run the MCP server with shutdown handling and proactive initialization.
+
+    This function initializes the ConnectionManager before starting the server
+    to ensure that database connections can be established in the background
+    even if not available at startup.
+    """
     try:
         # Proactively initialize ConnectionManager before server starts
         from .connection_manager import ConnectionManager

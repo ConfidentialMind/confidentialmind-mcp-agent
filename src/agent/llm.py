@@ -37,15 +37,17 @@ class LLMConnector:
         )
 
         logger.info(
-            f"LLM connector initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode"
+            f"LLMConnector: Initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode for config_id={config_id}"
         )
 
     async def _start_background_polling(self):
         """Start background polling for LLM URL if in stack deployment mode."""
         if self._background_fetch_task is not None and not self._background_fetch_task.done():
+            logger.info("LLMConnector: Background polling already started")
             return  # Already polling
 
         if self._is_stack_deployment:
+            logger.info("LLMConnector: Starting background polling for LLM URL")
             self._background_fetch_task = asyncio.create_task(self._poll_for_url_in_background())
 
     async def _poll_for_url_in_background(self):
@@ -58,15 +60,19 @@ class LLMConnector:
 
         while True:
             try:
-                if self.is_connected():
-                    # Already connected, just check periodically
-                    await asyncio.sleep(30)
-                    continue
-
                 current_base_url, headers = await connector_manager.fetch_llm_url(self.config_id)
 
+                # Only log at appropriate intervals to reduce noise
+                if retry_count < max_retry_log or retry_count % 10 == 0:
+                    if current_base_url:
+                        logger.debug(
+                            f"LLMConnector: Poll {retry_count}: Found URL {current_base_url}"
+                        )
+                    else:
+                        logger.debug(f"LLMConnector: Poll {retry_count}: No URL available")
+
                 if current_base_url and current_base_url != self._last_base_url:
-                    logger.info(f"Found new LLM URL, updating connection")
+                    logger.info(f"LLMConnector: Found new LLM URL, updating connection")
                     self._last_base_url = current_base_url
                     self._last_headers = headers or {}
 
@@ -75,11 +81,11 @@ class LLMConnector:
                         await self._session.close()
                     self._session = aiohttp.ClientSession(headers=self._last_headers)
                     self._is_connected = True
-                    logger.info("Successfully connected to LLM in background")
+                    logger.info("LLMConnector: Successfully connected to LLM in background")
             except Exception as e:
                 # Log less frequently as retries increase
                 if retry_count < max_retry_log or retry_count % 10 == 0:
-                    logger.debug(f"Background polling: Error connecting to LLM: {e}")
+                    logger.error(f"LLMConnector: Error in background polling: {e}")
 
             retry_count += 1
             # Exponential backoff with a maximum wait time
@@ -89,6 +95,10 @@ class LLMConnector:
     async def initialize(self) -> bool:
         """
         Initialize the connector by fetching API parameters.
+
+        This method will set up background polling for URL changes in stack deployment mode
+        and attempt to establish an initial connection. It will not fail if the connection
+        is not available, allowing the agent to start without an LLM connection.
 
         Returns:
             bool: True if initialization was successful
@@ -106,12 +116,14 @@ class LLMConnector:
             current_base_url, headers = await connector_manager.fetch_llm_url(self.config_id)
 
             # Start background polling for URL changes
-            if self._is_stack_deployment and not self._background_fetch_task:
+            if self._is_stack_deployment:
                 await self._start_background_polling()
 
             # Check if connector is configured
             if not current_base_url:
-                logger.warning(f"Connector for {self.config_id} is not configured - missing URL")
+                logger.warning(
+                    f"LLMConnector: Connector for {self.config_id} is not configured - missing URL"
+                )
                 self._is_connected = False
                 return False
 
@@ -123,11 +135,11 @@ class LLMConnector:
             if self._session is None:
                 self._session = aiohttp.ClientSession(headers=self._last_headers)
 
-            logger.info(f"Successfully initialized LLM connector for {self.config_id}")
+            logger.info(f"LLMConnector: Successfully initialized for {self.config_id}")
             self._is_connected = True
             return True
         except Exception as e:
-            logger.error(f"Error initializing LLM connector: {e}")
+            logger.error(f"LLMConnector: Error initializing: {e}")
             self._is_connected = False
             return False
 
@@ -138,6 +150,8 @@ class LLMConnector:
     async def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
         Generate text from the LLM based on the prompt.
+
+        If the LLM is not connected, returns a message indicating the LLM is unavailable.
 
         Args:
             prompt: The user prompt
@@ -167,18 +181,30 @@ class LLMConnector:
             async with self._session.post(url, json=payload) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    logger.error(f"LLM request failed: {response.status} - {error_text}")
+                    logger.error(f"LLMConnector: Request failed: {response.status} - {error_text}")
                     return "I encountered an error while processing your request. My language model service is experiencing issues."
 
                 result = await response.json()
                 return result["choices"][0]["message"]["content"]
         except Exception as e:
-            logger.error(f"Error generating text from LLM: {e}")
+            logger.error(f"LLMConnector: Error generating text: {e}")
             self._is_connected = False  # Mark as disconnected on error
             return "I'm currently unable to generate a response due to a technical issue with my language model service. Please try again later."
 
     async def close(self):
         """Close the connector and release resources"""
         if self._session:
+            logger.info("LLMConnector: Closing session")
             await self._session.close()
             self._session = None
+            logger.info("LLMConnector: Session closed")
+
+        # Cancel background polling task
+        if self._background_fetch_task and not self._background_fetch_task.done():
+            logger.info("LLMConnector: Cancelling background polling task")
+            self._background_fetch_task.cancel()
+            try:
+                await self._background_fetch_task
+            except asyncio.CancelledError:
+                pass
+            self._background_fetch_task = None

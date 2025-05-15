@@ -18,7 +18,8 @@ class TransportManager:
     """Manages transport configurations for FastMCP clients."""
 
     def __init__(self, mode: Literal["cli", "api"] = "cli"):
-        """Initialize transport manager with specified mode.
+        """
+        Initialize transport manager with specified mode.
 
         Args:
             mode: Operating mode - "cli" for stdio transport or "api" for SSE
@@ -35,15 +36,17 @@ class TransportManager:
         )
 
         logger.info(
-            f"Transport manager initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode"
+            f"TransportManager: Initialized in {'stack deployment' if self._is_stack_deployment else 'local config'} mode with {mode} mode"
         )
 
     async def _start_background_polling(self):
         """Start background polling for MCP server URLs if in stack deployment mode."""
         if self._background_fetch_task is not None and not self._background_fetch_task.done():
+            logger.info("TransportManager: Background polling already started")
             return  # Already polling
 
         if self._is_stack_deployment:
+            logger.info("TransportManager: Starting background polling for MCP server URLs")
             self._background_fetch_task = asyncio.create_task(
                 self._poll_for_mcp_servers_in_background()
             )
@@ -65,18 +68,22 @@ class TransportManager:
                     # Check for new servers
                     for server_id, server_url in servers.items():
                         if server_id not in known_servers:
-                            logger.info(f"Found new MCP server: {server_id}")
+                            logger.info(f"TransportManager: Found new MCP server: {server_id}")
                             known_servers.add(server_id)
                             try:
                                 self.configure_transport(server_id, server_url=server_url)
                                 self.create_client(server_id)
-                                logger.info(f"Successfully configured transport for {server_id}")
+                                logger.info(
+                                    f"TransportManager: Successfully configured transport for {server_id}"
+                                )
                             except Exception as e:
-                                logger.error(f"Error configuring transport for {server_id}: {e}")
+                                logger.error(
+                                    f"TransportManager: Error configuring transport for {server_id}: {e}"
+                                )
             except Exception as e:
                 # Log less frequently as retries increase
                 if retry_count < max_retry_log or retry_count % 10 == 0:
-                    logger.debug(f"Background polling: Error fetching MCP servers: {e}")
+                    logger.error(f"TransportManager: Error fetching MCP servers: {e}")
 
             retry_count += 1
             # Exponential backoff with a maximum wait time
@@ -90,7 +97,8 @@ class TransportManager:
         server_url: Optional[str] = None,
         use_module: bool = True,
     ) -> None:
-        """Configure transport for a specific server.
+        """
+        Configure transport for a specific server.
 
         Args:
             server_id: Unique identifier for this server
@@ -99,7 +107,9 @@ class TransportManager:
             use_module: Whether to use module execution (-m flag) for CLI mode
         """
         if server_id in self.transports:
-            logger.warning(f"Transport for {server_id} already configured. Reconfiguring.")
+            logger.warning(
+                f"TransportManager: Transport for {server_id} already configured. Reconfiguring."
+            )
 
         if self.mode == "cli":
             if not server_path:
@@ -115,31 +125,38 @@ class TransportManager:
                 try:
                     module_path = path_to_module_path(server_path)
                     self.transports[server_id] = ModuleStdioTransport(module_path=module_path)
-                    logger.info(f"Configured module transport for {server_id}: {module_path}")
+                    logger.info(
+                        f"TransportManager: Configured module transport for {server_id}: {module_path}"
+                    )
                 except Exception as e:
                     logger.warning(
-                        f"Failed to create module transport for {server_id}: {e}. "
+                        f"TransportManager: Failed to create module transport for {server_id}: {e}. "
                         f"Falling back to script transport."
                     )
                     self.transports[server_id] = PythonStdioTransport(script_path=server_path)
-                    logger.info(f"Configured stdio transport for {server_id}: {server_path}")
+                    logger.info(
+                        f"TransportManager: Configured stdio transport for {server_id}: {server_path}"
+                    )
             else:
                 # Use regular PythonStdioTransport
                 self.transports[server_id] = PythonStdioTransport(script_path=server_path)
-                logger.info(f"Configured stdio transport for {server_id}: {server_path}")
+                logger.info(
+                    f"TransportManager: Configured stdio transport for {server_id}: {server_path}"
+                )
 
         elif self.mode == "api":
             if not server_url:
                 raise ValueError(f"server_url required for API mode transport: {server_id}")
 
             self.transports[server_id] = SSETransport(url=server_url)
-            logger.info(f"Configured SSE transport for {server_id}: {server_url}")
+            logger.info(f"TransportManager: Configured SSE transport for {server_id}: {server_url}")
 
         else:
             raise ValueError(f"Unsupported mode: {self.mode}")
 
     def configure_from_dict(self, config: Dict[str, str], use_module: bool = True) -> None:
-        """Configure multiple transports from a dictionary.
+        """
+        Configure multiple transports from a dictionary.
 
         Args:
             config: Dictionary mapping server_id to path/url
@@ -157,26 +174,27 @@ class TransportManager:
         await connector_manager.initialize(register_connectors=True)
 
         # Start background polling for MCP server changes
-        if self._is_stack_deployment and not self._background_fetch_task:
+        if self._is_stack_deployment:
             await self._start_background_polling()
 
         servers = await connector_manager.fetch_mcp_servers()
         if not servers:
-            logger.warning("No MCP servers found from stack configuration")
+            logger.warning("TransportManager: No MCP servers found from stack configuration")
             return
 
         # Configure transports based on mode
         for server_id, server_url in servers.items():
             try:
                 logger.info(
-                    f"Configuring transport for {server_id} with url {server_url} from stack"
+                    f"TransportManager: Configuring transport for {server_id} with url {server_url} from stack"
                 )
                 self.configure_transport(server_id, server_url=server_url)
             except Exception as e:
-                logger.error(f"Error configuring transport for {server_id}: {e}")
+                logger.error(f"TransportManager: Error configuring transport for {server_id}: {e}")
 
     def create_client(self, server_id: str) -> Optional[Client]:
-        """Create a FastMCP client for a configured transport.
+        """
+        Create a FastMCP client for a configured transport.
 
         Args:
             server_id: The server identifier to create a client for
@@ -185,7 +203,7 @@ class TransportManager:
             FastMCP Client instance or None if transport not configured
         """
         if server_id not in self.transports:
-            logger.error(f"No transport configured for server_id: {server_id}")
+            logger.error(f"TransportManager: No transport configured for server_id: {server_id}")
             return None
 
         transport = self.transports[server_id]
@@ -194,7 +212,8 @@ class TransportManager:
         return client
 
     def create_all_clients(self) -> Dict[str, Client]:
-        """Create clients for all configured transports.
+        """
+        Create clients for all configured transports.
 
         Returns:
             Dictionary mapping server_id to Client instances
@@ -206,7 +225,8 @@ class TransportManager:
         return self.clients
 
     def get_client(self, server_id: str) -> Optional[Client]:
-        """Get existing client by server_id or create if not exists.
+        """
+        Get existing client by server_id or create if not exists.
 
         Args:
             server_id: The server identifier
@@ -220,7 +240,8 @@ class TransportManager:
         return self.create_client(server_id)
 
     def get_all_clients(self) -> Dict[str, Client]:
-        """Get all configured clients.
+        """
+        Get all configured clients.
 
         Returns:
             Dictionary mapping server_id to Client instances

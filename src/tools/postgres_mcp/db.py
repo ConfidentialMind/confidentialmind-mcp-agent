@@ -35,9 +35,21 @@ class DatabaseUnavailableError(DatabaseError):
 
 
 async def create_pool() -> Optional[asyncpg.Pool]:
-    """Creates an asyncpg connection pool with ConfidentialMind support."""
+    """
+    Creates an asyncpg connection pool with ConfidentialMind support.
+
+    This function will not raise an exception if the database is not
+    available, allowing the server to start without a database connection.
+
+    Returns:
+        asyncpg.Pool or None if connection couldn't be established
+    """
     await ConnectionManager.initialize()
-    return await ConnectionManager.create_pool()
+    try:
+        return await ConnectionManager.create_pool()
+    except Exception as e:
+        logger.error(f"Failed to create database pool: {e}")
+        return None
 
 
 class DatabaseClient:
@@ -48,7 +60,13 @@ class DatabaseClient:
         self.pool = pool
 
     async def get_table_schemas(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Retrieves schema information for tables accessible by the current user."""
+        """
+        Retrieves schema information for tables accessible by the current user.
+
+        Raises:
+            DatabaseUnavailableError: If database connection is not available
+            DatabaseError: For other database-related errors
+        """
         if self.pool is None:
             raise DatabaseUnavailableError("Database connection is not available yet")
 
@@ -124,8 +142,8 @@ class DatabaseClient:
 
         try:
             async with self.pool.acquire() as conn:
-                # Consider setting a statement timeout for safety
-                # await conn.execute("SET statement_timeout = 5000")  # 5 seconds
+                # Set a statement timeout for safety
+                await conn.execute("SET statement_timeout = 5000")  # 5 seconds
                 results = await conn.fetch(sql_query)
                 # Convert asyncpg Record objects to dictionaries
                 return [dict(row) for row in results]
