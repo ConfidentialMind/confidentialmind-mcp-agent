@@ -1,3 +1,4 @@
+from confidentialmind_core.config_manager import load_environment
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -11,9 +12,9 @@ class PostgresSettings(BaseSettings):
 
     host: str = Field(default="localhost")
     port: int = Field(default=5432)
-    user: str = Field(default="postgres")
-    password: str = Field(default="postgres")
-    database: str = Field(default="test_db")
+    user: str = Field(default="app")
+    password: str = Field(default="testpass")
+    database: str = Field(default="vector-db")
 
     # Optional: Alternatively, provide a full DSN
     dsn: str | None = Field(default=None)
@@ -25,6 +26,9 @@ class PostgresSettings(BaseSettings):
             return self.dsn
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
 
+
+# Load enviornment variables to initialize LOCAL_DEV and LOCAL_CONFIGS flags
+load_environment()
 
 # Create a single settings instance for the application
 settings = PostgresSettings()

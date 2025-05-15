@@ -1,8 +1,10 @@
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import asyncpg
+from confidentialmind_core.config_manager import ConfigManager
+from confidentialmind_core.config_manager import config as cm_config
 
 from .settings import settings
 
@@ -28,30 +30,68 @@ class QueryValidationError(ValueError):
     pass
 
 
-async def create_pool() -> asyncpg.Pool:
-    """Creates an asyncpg connection pool."""
+class DatabaseConnectionError(DatabaseError):
+    """Exception raised when database connection fails."""
+
+    pass
+
+
+async def create_pool() -> Optional[asyncpg.Pool]:
+    """Creates an asyncpg connection pool if possible."""
     logger.info(f"Creating database connection pool for {settings.database}...")
+
+    dsn = None
+
+    # In stack deployment mode, try to get the DSN from the ConfigManager
+    if not cm_config.LOCAL_CONFIGS:
+        try:
+            config_manager = ConfigManager()
+
+            # Get the database URL from the ConfigManager
+            db_url = config_manager.getUrlForConnector("DATABASE")
+            if not db_url:
+                logger.warning(
+                    "No database connector configured yet. Database connection will be retried later."
+                )
+                return None
+
+            # For PostgreSQL, ConfigManager returns the hostname without protocol or port
+            # We need to construct the full DSN
+            dsn = f"postgresql://{settings.user}:{settings.password}@{db_url}/{settings.database}"
+            logger.info(f"Using stack database URL: {db_url}")
+        except Exception as e:
+            logger.warning(f"Error getting database URL from ConfigManager: {e}")
+            return None
+    else:
+        # In local mode, use the DSN from settings
+        dsn = settings.effective_dsn
+
     try:
-        pool = await asyncpg.create_pool(dsn=settings.effective_dsn, min_size=1, max_size=5)
+        pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=5)
         if not pool:
-            raise ConnectionError("Failed to create database pool (returned None).")
+            logger.warning("Failed to create database pool (returned None).")
+            return None
         logger.info("Database connection pool created successfully.")
         return pool
     except Exception as e:
         logger.error(f"Error creating database connection pool: {e}")
-        raise ConnectionError(f"Failed to connect to database: {e}")
+        return None
 
 
 class DatabaseClient:
     """Client for executing read-only PostgreSQL operations."""
 
-    def __init__(self, pool: asyncpg.Pool):
+    def __init__(self, pool: Optional[asyncpg.Pool]):
         """Initialize with a connection pool."""
         self.pool = pool
 
     async def get_table_schemas(self) -> Dict[str, List[Dict[str, Any]]]:
         """Retrieves schema information for tables accessible by the current user."""
         schemas: Dict[str, List[Dict[str, Any]]] = {}
+
+        if self.pool is None:
+            logger.warning("Database pool not available. Returning empty schemas.")
+            return schemas
 
         try:
             async with self.pool.acquire() as conn:
@@ -116,6 +156,10 @@ class DatabaseClient:
             )
 
         logger.debug(f"Executing read-only query: {sql_query[:100]}...")
+
+        if self.pool is None:
+            logger.error("Database pool not available. Cannot execute query.")
+            raise DatabaseError("Database connection is not available.")
 
         try:
             async with self.pool.acquire() as conn:
