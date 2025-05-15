@@ -8,7 +8,16 @@ from pathlib import Path
 from typing import Dict, Literal, Optional
 
 import typer
-from confidentialmind_core.config_manager import load_environment
+from confidentialmind_core.config_manager import (
+    ArrayConnectorSchema,
+    ConfigManager,
+    ConnectorSchema,
+)
+from confidentialmind_core.config_manager import config as cm_config
+from confidentialmind_core.config_manager import (
+    load_environment,
+)
+from pydantic import BaseModel
 
 from src.agent.agent import Agent
 from src.agent.database import Database, DatabaseSettings, fetch_db_url
@@ -17,6 +26,7 @@ from src.agent.transport import TransportManager
 
 logger = logging.getLogger("fastmcp_agent")
 
+# Initialize environment variables and config flags
 load_environment()
 
 app = typer.Typer(
@@ -24,6 +34,13 @@ app = typer.Typer(
     help="FastMCP agent for interacting with MCP servers",
     add_completion=False,
 )
+
+
+class AgentConfig(BaseModel):
+    """Minimal config for the agent."""
+
+    name: str = "confidentialmind-agent"
+    description: str = "FastMCP agent for ConfidentialMind stack"
 
 
 async def run_agent(
@@ -42,25 +59,64 @@ async def run_agent(
         default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/sse")
         mcp_servers = {"agentTools": default_mcp_server}
 
+    # Check deployment mode
+    if not cm_config.LOCAL_CONFIGS and mode == "cli":
+        logger.warning("Running in stack deployment mode with CLI transport is not recommended")
+
+    # Initialize ConfigManager if in stack deployment mode
+    if not cm_config.LOCAL_CONFIGS:
+        logger.info("Initializing ConfigManager for stack deployment")
+        config_manager = ConfigManager()
+
+        # Define connectors
+        connectors = [
+            ConnectorSchema(type="llm", label="LLM Model", config_id=llm_config_id),
+            ConnectorSchema(type="database", label="Session Database", config_id=db_config_id),
+        ]
+
+        # Define array connector for MCP servers
+        array_connectors = [
+            ArrayConnectorSchema(
+                type="agent_tool", label="MCP Tool Servers", config_id="agentTools"
+            )
+        ]
+
+        # Initialize the ConfigManager
+        config_manager.init_manager(
+            config_model=AgentConfig(),
+            connectors=connectors,
+            array_connectors=array_connectors,
+        )
+        logger.info("ConfigManager initialized with connectors")
+
     # Initialize database
-    db_url = await fetch_db_url(db_config_id)
     db_settings = DatabaseSettings()
     database = Database(db_settings)
-    success = await database.connect(db_url)
-    if not success:
-        logger.error("Failed to connect to database")
-        typer.secho(
-            "ERROR: Failed to connect to database. Check configuration and try again.",
-            fg=typer.colors.RED,
-        )
-        return
 
-    # Initialize schema if needed
-    success = await database.ensure_schema()
-    if not success:
-        logger.warning("Could not ensure database schema. Some operations might fail.")
+    # Try to connect to the database
+    if cm_config.LOCAL_CONFIGS:
+        # In local mode, fetch URL from env vars
+        db_url = await fetch_db_url(db_config_id)
+        await database.connect(db_url)
+    else:
+        # In stack mode, database URL will be fetched from ConfigManager during connect
+        await database.connect()
+
+    # Check database connection status
+    if database.is_connected():
+        logger.info("Database connected successfully")
+        # Initialize schema if needed
+        success = await database.ensure_schema()
+        if not success:
+            logger.warning("Could not ensure database schema. Some operations might fail.")
+            typer.secho(
+                "WARNING: Could not ensure database schema. Some operations might fail.",
+                fg=typer.colors.YELLOW,
+            )
+    else:
+        logger.warning("Database not connected. Agent will operate in stateless mode.")
         typer.secho(
-            "WARNING: Could not ensure database schema. Some operations might fail.",
+            "WARNING: Database not connected. Agent will operate in stateless mode.",
             fg=typer.colors.YELLOW,
         )
 
@@ -68,36 +124,41 @@ async def run_agent(
     llm_connector = LLMConnector(llm_config_id)
     success = await llm_connector.initialize()
     if not success:
-        logger.error("Failed to initialize LLM connector")
+        logger.warning("LLM connector not initialized. Agent may have limited functionality.")
         typer.secho(
-            "ERROR: Failed to initialize LLM connector. Check configuration and try again.",
-            fg=typer.colors.RED,
+            "WARNING: LLM connector not initialized. Agent may have limited functionality.",
+            fg=typer.colors.YELLOW,
         )
-        return
 
     # Create and configure transport manager
     transport_manager = TransportManager(mode=mode)
 
-    # Configure transports based on mode
-    for server_id, server_ref in mcp_servers.items():
-        try:
-            if mode == "cli":
-                transport_manager.configure_transport(
-                    server_id,
-                    server_path=server_ref,
-                    use_module=use_module,
+    # Configure transports based on mode and deployment
+    if cm_config.LOCAL_CONFIGS or mode == "cli":
+        # In local mode or CLI mode, use provided MCP servers
+        for server_id, server_ref in mcp_servers.items():
+            try:
+                if mode == "cli":
+                    transport_manager.configure_transport(
+                        server_id,
+                        server_path=server_ref,
+                        use_module=use_module,
+                    )
+                else:  # api mode
+                    transport_manager.configure_transport(
+                        server_id,
+                        server_url=server_ref,
+                    )
+            except Exception as e:
+                logger.error(f"Error configuring transport for {server_id}: {e}")
+                typer.secho(
+                    f"ERROR: Failed to configure transport for {server_id}. {e}",
+                    fg=typer.colors.RED,
                 )
-            else:  # api mode
-                transport_manager.configure_transport(
-                    server_id,
-                    server_url=server_ref,
-                )
-        except Exception as e:
-            logger.error(f"Error configuring transport for {server_id}: {e}")
-            typer.secho(
-                f"ERROR: Failed to configure transport for {server_id}. {e}", fg=typer.colors.RED
-            )
-            return
+                return
+    else:
+        # In stack deployment with API mode, MCP servers will be discovered by the TransportManager
+        await transport_manager.init_from_config_manager()
 
     # Generate a session ID if not provided
     if not session_id:
@@ -184,6 +245,10 @@ def query(
     """Run a query in CLI mode."""
     setup_logging(debug)
 
+    # Display deployment mode
+    deployment_mode = "stack" if not cm_config.LOCAL_CONFIGS else "local"
+    typer.secho(f"Running in {deployment_mode} deployment mode", fg=typer.colors.BLUE)
+
     # Load config file if provided
     config_data = load_config_file(config)
     mcp_servers = config_data.get("mcp_servers") if config_data else None
@@ -220,6 +285,10 @@ def serve(
 ):
     """Run the agent as an API server."""
     setup_logging(debug)
+
+    # Display deployment mode
+    deployment_mode = "stack" if not cm_config.LOCAL_CONFIGS else "local"
+    typer.secho(f"Running API server in {deployment_mode} deployment mode", fg=typer.colors.BLUE)
 
     # Load config file if provided
     config_data = load_config_file(config)
@@ -261,12 +330,24 @@ def clear_history(
 
     async def _clear_history():
         # Initialize database
-        db_url = await fetch_db_url(db)
         db_settings = DatabaseSettings()
         database = Database(db_settings)
-        success = await database.connect(db_url)
-        if not success:
-            typer.secho("ERROR: Failed to connect to database.", fg=typer.colors.RED)
+
+        # Try to connect to the database
+        if cm_config.LOCAL_CONFIGS:
+            # In local mode, fetch URL from env vars
+            db_url = await fetch_db_url(db)
+            await database.connect(db_url)
+        else:
+            # In stack mode, database URL will be fetched from ConfigManager during connect
+            await database.connect()
+
+        # Check database connection status
+        if database.is_stateless():
+            typer.secho(
+                "WARNING: Database is in stateless mode. No history to clear.",
+                fg=typer.colors.YELLOW,
+            )
             return
 
         try:

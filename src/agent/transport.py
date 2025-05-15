@@ -1,8 +1,11 @@
+import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Set
 
+from confidentialmind_core.config_manager import ArrayConnectorSchema, ConfigManager
+from confidentialmind_core.config_manager import config as cm_config
 from fastmcp import Client
 from fastmcp.client.transports import PythonStdioTransport, SSETransport
 
@@ -23,6 +26,8 @@ class TransportManager:
         self.mode = mode
         self.transports = {}
         self.clients: Dict[str, Client] = {}
+        self._mcp_retry_task = None
+        self._connected_mcp_ids: Set[str] = set()
 
     def configure_transport(
         self,
@@ -143,3 +148,91 @@ class TransportManager:
             Dictionary mapping server_id to Client instances
         """
         return self.clients
+
+    async def init_from_config_manager(self) -> None:
+        """Initialize transports from ConfigManager for stack deployment.
+
+        This method checks for MCP servers configured in the ConfigManager
+        and sets up SSE transports for them.
+        """
+        if cm_config.LOCAL_CONFIGS:
+            logger.info("Running in local mode, skipping ConfigManager MCP lookup")
+            return
+
+        if self.mode != "api":
+            logger.warning("ConfigManager MCP lookup only supported in API mode")
+            return
+
+        # Start background polling task
+        if self._mcp_retry_task is None or self._mcp_retry_task.done():
+            self._mcp_retry_task = asyncio.create_task(self._poll_for_mcp_servers())
+
+    async def _poll_for_mcp_servers(self) -> None:
+        """Continuously poll for MCP servers in the ConfigManager."""
+        poll_interval = 30  # seconds
+
+        while True:
+            try:
+                config_manager = ConfigManager()
+
+                # Check if ConfigManager is properly initialized
+                if (
+                    not hasattr(config_manager, "_ConfigManager__initialized")
+                    or not config_manager._ConfigManager__initialized
+                ):
+                    logger.warning("ConfigManager not initialized yet for MCP polling")
+                    await asyncio.sleep(poll_interval)
+                    continue
+
+                # Look for MCP array connector
+                array_connectors = config_manager.array_connectors
+                if array_connectors:
+                    for connector in array_connectors:
+                        if connector.config_id == "MCP_SERVERS":
+                            self._process_mcp_connector(connector)
+                            break
+
+                # Sleep before next poll
+                await asyncio.sleep(poll_interval)
+
+            except Exception as e:
+                logger.error(f"Error polling for MCP servers: {e}")
+                await asyncio.sleep(poll_interval)
+
+    def _process_mcp_connector(self, connector: ArrayConnectorSchema) -> None:
+        """Process a discovered MCP connector and set up transports."""
+        if not connector.stack_ids:
+            logger.info("MCP_SERVERS connector exists but has no stack_ids configured")
+            return
+
+        config_manager = ConfigManager()
+
+        # Get URLs for each stack ID
+        for i, stack_id in enumerate(connector.stack_ids):
+            # Skip already connected MCPs
+            if stack_id in self._connected_mcp_ids:
+                continue
+
+            try:
+                # Get the namespace from the connector type
+                namespace = config_manager.getNamespaceForConnector("MCP_SERVERS")
+                if not namespace:
+                    namespace = "api-services"  # Default namespace
+
+                # Construct the URL
+                server_url = f"http://{stack_id}.{namespace}.svc.cluster.local:8080/sse"
+                server_id = f"mcp-{stack_id}"
+
+                # Configure the transport
+                self.configure_transport(server_id, server_url=server_url)
+
+                # Create the client
+                self.create_client(server_id)
+
+                # Remember that we've connected to this MCP
+                self._connected_mcp_ids.add(stack_id)
+
+                logger.info(f"Added MCP server from ConfigManager: {server_id} -> {server_url}")
+
+            except Exception as e:
+                logger.error(f"Error configuring MCP server {stack_id}: {e}")

@@ -1,5 +1,3 @@
-"""OpenAI API-compatible endpoint for the FastMCP agent."""
-
 import logging
 import os
 import uuid
@@ -8,6 +6,12 @@ from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
 import uvicorn
+from confidentialmind_core.config_manager import (
+    ArrayConnectorSchema,
+    ConfigManager,
+    ConnectorSchema,
+)
+from confidentialmind_core.config_manager import config as cm_config
 from confidentialmind_core.config_manager import load_environment
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +25,7 @@ from src.agent.transport import TransportManager
 # Configure logging
 logger = logging.getLogger("fastmcp_agent.api")
 
+# Initialize environment variables and config flags
 load_environment()
 
 
@@ -76,19 +81,25 @@ class AgentComponents:
         self.mcp_servers: Dict[str, str] = {}
         self.exit_stack = AsyncExitStack()
         self.initialized = False
+        self.connectors_initialized = False
         self.db_config_id = os.environ.get("DB_CONFIG_ID", "DATABASE")
         self.llm_config_id = os.environ.get("LLM_CONFIG_ID", "LLM")
+        self.config_manager = None
 
-        # Get MCP server URLs from environment with a default
-        default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/sse")
-        self.mcp_servers = {"agentTools": default_mcp_server}
+        # Initialize environment variables
+        load_environment()
 
-        # Check if there are any additional MCP servers specified in the format MCP_SERVER_NAME=url
-        for key, value in os.environ.items():
-            if key.startswith("MCP_SERVER_") and value:
-                server_name = key[11:].lower()  # Remove "MCP_SERVER_" prefix and lowercase
-                if server_name and value:
-                    self.mcp_servers[server_name] = value
+        # Get MCP server URLs from environment with a default for local mode
+        if cm_config.LOCAL_CONFIGS:
+            default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/sse")
+            self.mcp_servers = {"agentTools": default_mcp_server}
+
+            # Check if there are any additional MCP servers specified in the format MCP_SERVER_NAME=url
+            for key, value in os.environ.items():
+                if key.startswith("MCP_SERVER_") and value:
+                    server_name = key[11:].lower()  # Remove "MCP_SERVER_" prefix and lowercase
+                    if server_name and value:
+                        self.mcp_servers[server_name] = value
 
     async def initialize(self):
         """Initialize agent components"""
@@ -96,39 +107,51 @@ class AgentComponents:
             return True
 
         try:
-            # Initialize database
-            db_url = await fetch_db_url(self.db_config_id)
-            db_settings = DatabaseSettings()
-            self.database = Database(db_settings)
-            success = await self.database.connect(db_url)
-            if not success:
-                logger.error("Failed to connect to database")
-                return False
+            # Set up ConfigManager for stack deployment mode
+            if not cm_config.LOCAL_CONFIGS and not self.connectors_initialized:
+                await self._initialize_config_manager()
 
-            # Initialize schema
-            success = await self.database.ensure_schema()
-            if not success:
-                logger.warning("Could not ensure database schema. Some operations might fail.")
+            # Initialize database
+            self.database = Database(DatabaseSettings())
+
+            # Try to connect to the database
+            if cm_config.LOCAL_CONFIGS:
+                # In local mode, fetch URL from env vars
+                db_url = await fetch_db_url(self.db_config_id)
+                await self.database.connect(db_url)
+            else:
+                # In stack mode, database URL will be fetched from ConfigManager during connect
+                await self.database.connect()
+
+            # Initialize schema if database is connected
+            if self.database.is_connected():
+                await self.database.ensure_schema()
+            else:
+                logger.warning("Database not connected. Agent will operate in stateless mode.")
 
             # Initialize LLM connector
             self.llm_connector = LLMConnector(self.llm_config_id)
             success = await self.llm_connector.initialize()
             if not success:
-                logger.error("Failed to initialize LLM connector")
-                return False
-
-            self.initialized = True
+                logger.warning(
+                    "LLM connector not initialized. Agent may have limited functionality."
+                )
 
             # Initialize transport manager for API mode
             self.transport_manager = TransportManager(mode="api")
 
-            # Configure transports
-            for server_id, server_url in self.mcp_servers.items():
-                try:
-                    self.transport_manager.configure_transport(server_id, server_url=server_url)
-                except Exception as e:
-                    logger.error(f"Error configuring transport for {server_id}: {e}")
-                    return False
+            # Configure transports based on mode
+            if cm_config.LOCAL_CONFIGS:
+                # In local mode, use environment-specified MCP servers
+                for server_id, server_url in self.mcp_servers.items():
+                    try:
+                        self.transport_manager.configure_transport(server_id, server_url=server_url)
+                    except Exception as e:
+                        logger.error(f"Error configuring transport for {server_id}: {e}")
+            else:
+                # In stack mode, MCP servers will be discovered by the TransportManager
+                # during initialization
+                await self.transport_manager.init_from_config_manager()
 
             # Create all clients
             self.transport_manager.create_all_clients()
@@ -141,6 +164,38 @@ class AgentComponents:
             # Clean up any potentially partially initialized resources
             await self.cleanup()
             return False
+
+    async def _initialize_config_manager(self):
+        """Initialize the ConfigManager for stack deployment."""
+        try:
+            self.config_manager = ConfigManager()
+
+            # Define connectors
+            connectors = [
+                ConnectorSchema(type="llm", label="LLM Model", config_id=self.llm_config_id),
+                ConnectorSchema(
+                    type="database", label="Session Database", config_id=self.db_config_id
+                ),
+            ]
+
+            # Define array connector for MCP servers
+            array_connectors = [
+                ArrayConnectorSchema(type="api", label="MCP Tool Servers", config_id="MCP_SERVERS")
+            ]
+
+            # Initialize the ConfigManager
+            self.config_manager.init_manager(
+                config_model=None,  # No config model needed
+                connectors=connectors,
+                array_connectors=array_connectors,
+            )
+
+            logger.info("ConfigManager initialized with connectors")
+            self.connectors_initialized = True
+
+        except Exception as e:
+            logger.error(f"Error initializing ConfigManager: {e}")
+            raise
 
     async def cleanup(self):
         """Clean up resources"""
@@ -156,7 +211,7 @@ class AgentComponents:
             await self.exit_stack.aclose()
             self.initialized = False
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}", exc_info=True)
+            logger.error(f"Error during cleanup: {e}")
 
 
 # Create FastAPI app and shared components
@@ -288,7 +343,29 @@ async def create_chat_completion(
 @app.get("/health")
 async def health_check(components: AgentComponents = Depends(get_components)):
     """Health check endpoint."""
-    return {"status": "healthy", "database": components.database.is_connected()}
+    db_status = (
+        "connected"
+        if components.database and components.database.is_connected()
+        else "disconnected"
+    )
+    llm_status = (
+        "connected"
+        if components.llm_connector and not getattr(components.llm_connector, "_unavailable", True)
+        else "disconnected"
+    )
+    mcp_count = (
+        len(components.transport_manager.get_all_clients()) if components.transport_manager else 0
+    )
+
+    deployment_mode = "stack" if not cm_config.LOCAL_CONFIGS else "local"
+
+    return {
+        "status": "healthy",
+        "deployment_mode": deployment_mode,
+        "database": db_status,
+        "llm": llm_status,
+        "mcp_servers": mcp_count,
+    }
 
 
 @app.on_event("startup")

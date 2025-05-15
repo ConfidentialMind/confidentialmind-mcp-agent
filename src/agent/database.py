@@ -5,6 +5,8 @@ from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 import backoff
+from confidentialmind_core.config_manager import ConfigManager
+from confidentialmind_core.config_manager import config as cm_config
 from confidentialmind_core.config_manager import get_api_parameters
 from pydantic_settings import BaseSettings
 
@@ -95,6 +97,7 @@ class Database:
         self._is_connecting: bool = False
         self._reconnect_task: Optional[asyncio.Task] = None
         self._current_db_url: Optional[str] = None
+        self._stateless: bool = False  # Flag to indicate if we're operating in stateless mode
 
     async def connect(self, db_url: Optional[str] = None) -> bool:
         """Establish connection to database with proper locking"""
@@ -108,6 +111,20 @@ class Database:
         self._is_connecting = True
         try:
             if db_url:
+                self._current_db_url = db_url
+            elif not cm_config.LOCAL_CONFIGS:
+                # In stack deployment mode, try to get the database URL from the ConfigManager
+                config_manager = ConfigManager()
+
+                # Get the database URL from the ConfigManager
+                db_url = config_manager.getUrlForConnector("DATABASE")
+                if not db_url:
+                    logger.warning(
+                        "No database connector configured yet. Operating in stateless mode."
+                    )
+                    self._stateless = True
+                    return False
+
                 self._current_db_url = db_url
 
             # Build connection string and connect
@@ -136,12 +153,14 @@ class Database:
 
             logger.info("Successfully connected to database")
             self._connection_error = None
+            self._stateless = False
             return True
 
         except Exception as e:
             self._connection_error = f"Failed to connect to database: {str(e)}"
             logger.error(self._connection_error)
             self._pool = None
+            self._stateless = True
             self._schedule_reconnect()
             return False
         finally:
@@ -160,6 +179,10 @@ class Database:
     def is_connected(self) -> bool:
         """Check if database is currently connected"""
         return self._pool is not None and not self._connection_error
+
+    def is_stateless(self) -> bool:
+        """Check if we're operating in stateless mode"""
+        return self._stateless
 
     def last_error(self) -> Optional[str]:
         """Get the last recorded connection error."""
@@ -194,6 +217,10 @@ class Database:
         Returns:
             Query results based on fetch_type
         """
+        if self._stateless:
+            logger.warning("Ignoring query execution, operating in stateless mode")
+            return [] if fetch_type != "none" else None
+
         await self.ensure_connected()
         async with self._pool.acquire() as conn:
             try:
@@ -215,6 +242,10 @@ class Database:
 
     async def load_history(self, session_id: str) -> List[Message]:
         """Load conversation history from the database for a session."""
+        if self._stateless:
+            logger.warning("Ignoring history load, operating in stateless mode")
+            return []
+
         try:
             await self.ensure_connected()
             results = await self.execute_query(
@@ -235,6 +266,10 @@ class Database:
 
     async def save_message(self, session_id: str, message: Message) -> bool:
         """Save a message to the database for a session."""
+        if self._stateless:
+            logger.warning("Ignoring message save, operating in stateless mode")
+            return False
+
         try:
             await self.ensure_connected()
             max_order = await self.execute_query(
@@ -266,6 +301,10 @@ class Database:
 
     async def clear_history(self, session_id: str) -> bool:
         """Clear the conversation history for a session in the database."""
+        if self._stateless:
+            logger.warning("Ignoring history clear, operating in stateless mode")
+            return False
+
         try:
             await self.ensure_connected()
             await self.execute_query(
@@ -281,6 +320,10 @@ class Database:
 
     async def ensure_schema(self) -> bool:
         """Ensure necessary database tables exist"""
+        if self._stateless:
+            logger.warning("Ignoring schema check, operating in stateless mode")
+            return False
+
         try:
             await self.ensure_connected()
 
@@ -419,7 +462,18 @@ async def fetch_db_url(config_id: str) -> Optional[str]:
     Returns:
         Database URL or None if not available
     """
-    # First try from SDK ConfigManager
+    # In local development mode, try env vars
+    if cm_config.LOCAL_CONFIGS:
+        try:
+            url, _ = get_api_parameters(config_id)
+            if url:
+                logger.info(f"Successfully retrieved database URL from environment: {url}")
+                return url
+        except Exception as e:
+            logger.warning(f"Error fetching database URL from environment: {e}")
+            return None
+
+    # In stack deployment mode, try from ConfigManager
     try:
         url, _ = get_api_parameters(config_id)
         if url:
@@ -429,20 +483,22 @@ async def fetch_db_url(config_id: str) -> Optional[str]:
         logger.warning(f"Error fetching database URL from ConfigManager: {e}")
 
     # If SDK fails, retry for a limited time
-    retries = 3
-    for i in range(retries):
-        try:
-            url, _ = get_api_parameters(config_id)
-            if url:
-                logger.info(
-                    f"Successfully retrieved database URL from ConfigManager on retry: {url}"
-                )
-                return url
-        except Exception as e:
-            logger.warning(f"Retry {i + 1}/{retries}: Error fetching database URL: {e}")
+    if not cm_config.LOCAL_CONFIGS:  # Only retry in stack deployment mode
+        retries = 3
+        for i in range(retries):
+            try:
+                url, _ = get_api_parameters(config_id)
+                if url:
+                    logger.info(
+                        f"Successfully retrieved database URL from ConfigManager on retry: {url}"
+                    )
+                    return url
+            except Exception as e:
+                logger.warning(f"Retry {i + 1}/{retries}: Error fetching database URL: {e}")
 
-        # Wait before retrying
-        await asyncio.sleep(5)
+            # Wait before retrying
+            await asyncio.sleep(5)
 
-    logger.warning(f"Failed to retrieve database URL after {retries} retries")
+        logger.warning(f"Failed to retrieve database URL after {retries} retries")
+
     return None

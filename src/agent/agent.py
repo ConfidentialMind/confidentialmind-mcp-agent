@@ -6,8 +6,7 @@ import uuid
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
-from fastmcp import Client
-from fastmcp.client.transports import SSETransport
+from confidentialmind_core.config_manager import config as cm_config
 from fastmcp.exceptions import ClientError
 
 from src.agent.database import Database
@@ -42,6 +41,7 @@ class Agent:
         self.transport_manager = transport_manager
         self.debug = debug
         self.current_history: List[Message] = []
+        self.stateless_mode = False  # Will be updated during initialization
 
         if debug:
             logger.setLevel(logging.DEBUG)
@@ -52,12 +52,29 @@ class Agent:
         """Initialize agent components."""
         logger.info("Initializing agent...")
 
+        # Try to initialize LLM connector
+        llm_initialized = await self.llm.initialize()
+        if not llm_initialized:
+            logger.warning("LLM connector not initialized. Agent may have limited functionality.")
+
+        # Check database connectivity
+        self.stateless_mode = self.db.is_stateless()
+        if self.stateless_mode:
+            logger.warning("Database not connected. Agent will operate in stateless mode.")
+
+        # Initialize MCP clients from ConfigManager if in stack mode
+        if not cm_config.LOCAL_CONFIGS:
+            await self.transport_manager.init_from_config_manager()
+
         # Ensure all clients are created
         self.transport_manager.create_all_clients()
 
         # Log available clients
         client_info = ", ".join([f"{k}" for k in self.transport_manager.get_all_clients().keys()])
-        logger.info(f"Initialized agent with MCP clients: {client_info}")
+        if client_info:
+            logger.info(f"Initialized agent with MCP clients: {client_info}")
+        else:
+            logger.info("No MCP clients available. Agent will function as a basic LLM.")
 
         return True
 
@@ -96,6 +113,11 @@ class Agent:
             state.execution_context["server_ids"] = list(
                 self.transport_manager.get_all_clients().keys()
             )
+
+            if not state.execution_context["server_ids"]:
+                logger.info("No MCP servers connected. Operating in basic LLM mode.")
+                state.execution_context["no_mcps_connected"] = True
+                return state
 
             # Discover tools and resources from each client concurrently
             tasks = {}
@@ -165,6 +187,12 @@ class Agent:
     async def _parse_query(self, state: AgentState) -> AgentState:
         """Use LLM to determine which MCPs and actions are needed."""
         logger.info("Parsing user query: %s", state.query)
+
+        # Check if we're operating without MCPs
+        if state.execution_context.get("no_mcps_connected", False):
+            logger.info("No MCP servers connected. Skipping planning phase.")
+            state.planned_actions = []  # No actions to take
+            return state
 
         try:
             # Format available tools/resources for LLM
@@ -570,6 +598,16 @@ class Agent:
         """Generate final response based on all gathered information."""
         logger.info("Generating final response...")
 
+        # Check if we need to inform the user about stateless mode
+        stateless_notice = ""
+        if self.stateless_mode:
+            stateless_notice = "\n\n(Note: I'm currently operating in stateless mode because session database is not connected. Your conversation history won't be saved between interactions.)"
+
+        # Check if we need to inform about no MCPs
+        no_mcp_notice = ""
+        if state.execution_context.get("no_mcps_connected", False):
+            no_mcp_notice = "\n\n(Note: No tool servers are currently connected. I'm operating as a basic assistant without additional capabilities.)"
+
         # Format results and history for the LLM
         formatted_results = self._format_results(state.mcp_results)
         conversation_context = self._format_conversation_history(self.current_history)
@@ -601,6 +639,11 @@ class Agent:
         # Call the LLM for response generation
         logger.debug("Sending response generation prompt to LLM.")
         response = await self.llm.generate(prompt)
+
+        # Append notices if needed
+        if stateless_notice or no_mcp_notice:
+            response += stateless_notice + no_mcp_notice
+
         state.response = response
         logger.info(f"Final response generated (length: {len(response)} chars).")
 
@@ -752,6 +795,12 @@ class Agent:
 
     async def _load_history(self, session_id: str) -> List[Message]:
         """Load conversation history from the database."""
+        if self.stateless_mode:
+            logger.info(
+                f"Database in stateless mode, returning empty history for session {session_id}"
+            )
+            return []  # Return empty history in stateless mode
+
         try:
             history = await self.db.load_history(session_id)
             self.current_history = history
@@ -762,23 +811,38 @@ class Agent:
 
     async def _save_message(self, session_id: str, message: Message) -> bool:
         """Save a message to the database and update in-memory history."""
+        # Always update in-memory history regardless of database state
+        if message not in self.current_history:
+            self.current_history.append(message)
+
+        # Skip saving to database in stateless mode
+        if self.stateless_mode:
+            logger.info(
+                f"Database in stateless mode, skipping message save for session {session_id}"
+            )
+            return False
+
         try:
             success = await self.db.save_message(session_id, message)
-            if message not in self.current_history:
-                self.current_history.append(message)
             return success
         except Exception as e:
             logger.error(f"Error saving message: {e}")
-            # Still update in-memory history
-            if message not in self.current_history:
-                self.current_history.append(message)
             return False
 
     async def clear_history(self, session_id: str) -> bool:
         """Clear conversation history for a session."""
+        # Always clear in-memory history
+        self.current_history = []
+
+        # Skip database operations in stateless mode
+        if self.stateless_mode:
+            logger.info(
+                f"Database in stateless mode, skipping history clear for session {session_id}"
+            )
+            return True
+
         try:
             success = await self.db.clear_history(session_id)
-            self.current_history = []
             return success
         except Exception as e:
             logger.error(f"Error clearing history: {e}")
@@ -794,7 +858,12 @@ class Agent:
         definite_session_id = session_id or str(uuid.uuid4())
         logger.info(f"Session ID: {definite_session_id}")
 
-        # Load history
+        # Check if database is in stateless mode
+        self.stateless_mode = self.db.is_stateless()
+        if self.stateless_mode:
+            logger.info("Database in stateless mode, running without history persistence")
+
+        # Load history if not in stateless mode
         await self._load_history(definite_session_id)
 
         # Handle management commands
@@ -809,12 +878,14 @@ class Agent:
             history_text = "History:\n" + (
                 "\n".join(map(str, self.current_history)) if self.current_history else "(empty)"
             )
+            if self.stateless_mode:
+                history_text += "\n\n(Note: I'm currently operating in stateless mode because session database is not connected. Your conversation history won't be saved between interactions.)"
             final_state = AgentState(
                 query=query, session_id=definite_session_id, response=history_text
             )
             return final_state
 
-        # Save user message
+        # Save user message to memory (and database if available)
         user_message = Message(role="user", content=query)
         await self._save_message(definite_session_id, user_message)
 
@@ -842,7 +913,7 @@ class Agent:
             # Generate final response
             state = await self._generate_response(state)
 
-            # Save assistant message
+            # Save assistant message (in memory and database if available)
             if state.execution_context.get("assistant_message_to_save"):
                 await self._save_message(
                     definite_session_id, state.execution_context["assistant_message_to_save"]
