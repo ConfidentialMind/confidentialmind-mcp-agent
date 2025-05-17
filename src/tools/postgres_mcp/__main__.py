@@ -6,8 +6,11 @@ import sys
 from threading import Event
 
 from confidentialmind_core.config_manager import load_environment
+from starlette.applications import Starlette
+from starlette.routing import Mount, Route
 
-from .server import mcp_server
+from .connection_manager import ConnectionManager
+from .server import http_health_endpoint, mcp_server
 from .settings import settings
 
 # Configure basic logging
@@ -41,6 +44,11 @@ def signal_handler(sig, frame):
             sys.exit(1)
 
 
+async def root_health_check(request):
+    """Root level health check that's always accessible."""
+    return await http_health_endpoint(request)
+
+
 async def run_server(transport_type, **kwargs):
     """
     Run the MCP server with shutdown handling and proactive initialization.
@@ -51,14 +59,37 @@ async def run_server(transport_type, **kwargs):
     """
     try:
         # Proactively initialize ConnectionManager before server starts
-        from .connection_manager import ConnectionManager
-
         logger.info("Proactively initializing ConnectionManager...")
         await ConnectionManager.initialize()
         logger.info("ConnectionManager initialized successfully")
 
-        # Now run the server as usual
-        return await mcp_server.run_async(transport=transport_type, **kwargs)
+        if transport_type in ("sse", "streamable-http"):
+            # For HTTP-based transports, create a combined app with root-level health endpoint
+            # Get the ASGI app for the MCP server
+            mcp_app = mcp_server.http_app(transport=transport_type, path="")
+
+            # Create a Starlette app with both the MCP app and a root-level health endpoint
+            combined_app = Starlette(
+                routes=[
+                    Route("/health", endpoint=root_health_check, methods=["GET"]),
+                    Mount("/", app=mcp_app),
+                ],
+                lifespan=mcp_app.router.lifespan_context,  # Important: use MCP server's lifespan
+            )
+
+            # Use additional kwargs (port, host, etc.) passed to this function
+            port = kwargs.get("port", 8080)
+            host = kwargs.get("host", "0.0.0.0")
+            log_level = kwargs.get("log_level", "info")
+
+            import uvicorn
+
+            config = uvicorn.Config(combined_app, host=host, port=port, log_level=log_level)
+            server = uvicorn.Server(config)
+            await server.serve()
+        else:
+            # For STDIO transport, use the normal run method
+            return await mcp_server.run_async(transport=transport_type, **kwargs)
     except asyncio.CancelledError:
         logger.info("Server task cancelled, shutting down gracefully")
     except Exception as e:
@@ -66,8 +97,6 @@ async def run_server(transport_type, **kwargs):
     finally:
         # Ensure ConnectionManager is closed on shutdown
         try:
-            from .connection_manager import ConnectionManager
-
             await ConnectionManager.close()
             logger.info("ConnectionManager closed during shutdown")
         except Exception as e:
@@ -109,18 +138,27 @@ if __name__ == "__main__":
         # Force SSE mode if explicitly requested
         use_sse = "--sse" in sys.argv
 
+        # TODO: refactor SSE for streamable-http
+        use_streamable = "--streamable-http" in sys.argv
+
         # Override stdio mode if SSE is explicitly requested
-        if use_sse:
+        if use_sse or use_streamable:
             use_stdio = False
 
         loop = asyncio.get_event_loop()
         if use_stdio:
             logger.info("Using stdio transport for agent communication")
             main_task = asyncio.ensure_future(run_server("stdio"))
-        else:
-            # Default to SSE transport for standalone server mode
+        elif use_sse:
+            # SSE transport for backward compatibility
             logger.info("Using SSE transport on port 8080")
             main_task = asyncio.ensure_future(run_server("sse", port=8080, log_level="debug"))
+        else:
+            # Default to Streamable HTTP transport for standalone server mode
+            logger.info("Using Streamable HTTP transport on port 8080")
+            main_task = asyncio.ensure_future(
+                run_server("streamable-http", port=8080, log_level="debug")
+            )
 
         loop.run_until_complete(main_task)
     except KeyboardInterrupt:

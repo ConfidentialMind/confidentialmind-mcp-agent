@@ -148,6 +148,12 @@ class TransportManager:
             if not server_url:
                 raise ValueError(f"server_url required for API mode transport: {server_id}")
 
+            # Ensure the URL has the /sse path for SSE transport
+            if not server_url.endswith("/sse"):
+                # Append /sse to the URL if it doesn't already end with it
+                server_url = server_url.rstrip("/") + "/sse"
+                logger.info(f"TransportManager: Appended /sse to the URL: {server_url}")
+
             self.transports[server_id] = SSETransport(url=server_url)
             logger.info(f"TransportManager: Configured SSE transport for {server_id}: {server_url}")
 
