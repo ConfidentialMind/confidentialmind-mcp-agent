@@ -29,5 +29,5 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 8080
 
 # Run the FastAPI application (defaults to port 8080)
-CMD ["python", "-m", "src.tools.postgres_mcp", "--sse"]
+CMD ["python", "-m", "src.tools.postgres_mcp", "--streamable-http"]
 

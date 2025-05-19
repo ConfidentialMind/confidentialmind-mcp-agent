@@ -40,7 +40,14 @@ async def run_agent(
     """Run the agent with the given query."""
     # Set default MCP servers if not provided
     if mcp_servers is None:
-        default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/sse")
+        # Default to streamable HTTP transport URL
+        default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/mcp")
+
+        # Handle legacy SSE URLs
+        if default_mcp_server.endswith("/sse"):
+            default_mcp_server = default_mcp_server.rsplit("/sse", 1)[0] + "/mcp"
+            logger.info(f"Converting legacy SSE URL to streamable HTTP: {default_mcp_server}")
+
         mcp_servers = {"agentTools": default_mcp_server}
 
     # Initialize database
@@ -229,10 +236,31 @@ def serve(
     config_data = load_config_file(config)
     mcp_servers = config_data.get("mcp_servers") if config_data else None
 
-    # Set environment variables for API server
+    # Process MCP server URLs to convert any legacy SSE URLs
     if mcp_servers:
+        updated_servers = {}
         for server_id, url in mcp_servers.items():
+            if url.endswith("/sse"):
+                updated_url = url.rsplit("/sse", 1)[0] + "/mcp"
+                logger.info(
+                    f"Converting legacy SSE URL to streamable HTTP for {server_id}: {updated_url}"
+                )
+                updated_servers[server_id] = updated_url
+            else:
+                updated_servers[server_id] = url
+
+        # Set environment variables with updated URLs
+        for server_id, url in updated_servers.items():
             os.environ[f"MCP_SERVER_{server_id.upper()}"] = url
+    else:
+        # Check if any environment variables need conversion
+        for key, value in os.environ.items():
+            if key.startswith("MCP_SERVER_") and value and value.endswith("/sse"):
+                updated_url = value.rsplit("/sse", 1)[0] + "/mcp"
+                logger.info(
+                    f"Converting legacy SSE URL to streamable HTTP for {key}: {updated_url}"
+                )
+                os.environ[key] = updated_url
 
     # Set other environment variables
     if db:

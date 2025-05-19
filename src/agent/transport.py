@@ -6,7 +6,7 @@ from typing import Dict, Literal, Optional
 
 from confidentialmind_core.config_manager import load_environment
 from fastmcp import Client
-from fastmcp.client.transports import PythonStdioTransport, SSETransport
+from fastmcp.client.transports import PythonStdioTransport, StreamableHttpTransport
 
 from src.agent.connectors import ConnectorConfigManager
 from src.agent.module_transport import ModuleStdioTransport, path_to_module_path
@@ -22,7 +22,7 @@ class TransportManager:
         Initialize transport manager with specified mode.
 
         Args:
-            mode: Operating mode - "cli" for stdio transport or "api" for SSE
+            mode: Operating mode - "cli" for stdio transport or "api" for streamable HTTP
         """
         self.mode = mode
         self.transports = {}
@@ -103,7 +103,7 @@ class TransportManager:
         Args:
             server_id: Unique identifier for this server
             server_path: Path to Python script (for CLI mode)
-            server_url: URL for SSE endpoint (for API mode)
+            server_url: URL for HTTP endpoint (for API mode)
             use_module: Whether to use module execution (-m flag) for CLI mode
         """
         if server_id in self.transports:
@@ -148,14 +148,20 @@ class TransportManager:
             if not server_url:
                 raise ValueError(f"server_url required for API mode transport: {server_id}")
 
-            # Ensure the URL has the /sse path for SSE transport
-            if not server_url.endswith("/sse"):
-                # Append /sse to the URL if it doesn't already end with it
-                server_url = server_url.rstrip("/") + "/sse"
-                logger.info(f"TransportManager: Appended /sse to the URL: {server_url}")
+            # Handle URL path for streamable HTTP transport
+            if server_url.endswith("/sse"):
+                # If URL still has /sse (from previous version), replace with /mcp
+                server_url = server_url.rsplit("/sse", 1)[0] + "/mcp"
+                logger.info(f"TransportManager: Converted SSE URL to MCP URL: {server_url}")
+            elif not server_url.endswith("/mcp"):
+                # Ensure the URL has the /mcp path for streamable HTTP transport
+                server_url = server_url.rstrip("/") + "/mcp"
+                logger.info(f"TransportManager: Appended /mcp to the URL: {server_url}")
 
-            self.transports[server_id] = SSETransport(url=server_url)
-            logger.info(f"TransportManager: Configured SSE transport for {server_id}: {server_url}")
+            self.transports[server_id] = StreamableHttpTransport(url=server_url)
+            logger.info(
+                f"TransportManager: Configured streamable HTTP transport for {server_id}: {server_url}"
+            )
 
         else:
             raise ValueError(f"Unsupported mode: {self.mode}")

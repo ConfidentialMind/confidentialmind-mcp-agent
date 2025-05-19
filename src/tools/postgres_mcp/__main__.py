@@ -63,10 +63,10 @@ async def run_server(transport_type, **kwargs):
         await ConnectionManager.initialize()
         logger.info("ConnectionManager initialized successfully")
 
-        if transport_type in ("sse", "streamable-http"):
+        if transport_type == "streamable-http":
             # For HTTP-based transports, create a combined app with root-level health endpoint
             # Get the ASGI app for the MCP server
-            mcp_app = mcp_server.http_app(transport=transport_type, path="")
+            mcp_app = mcp_server.http_app(path="")
 
             # Create a Starlette app with both the MCP app and a root-level health endpoint
             combined_app = Starlette(
@@ -87,9 +87,15 @@ async def run_server(transport_type, **kwargs):
             config = uvicorn.Config(combined_app, host=host, port=port, log_level=log_level)
             server = uvicorn.Server(config)
             await server.serve()
-        else:
+        elif transport_type == "stdio":
             # For STDIO transport, use the normal run method
             return await mcp_server.run_async(transport=transport_type, **kwargs)
+        else:
+            logger.warning(
+                f"Unsupported transport type: {transport_type}, defaulting to streamable-http"
+            )
+            # Fall back to streamable-http for any unknown transport type
+            return await run_server("streamable-http", **kwargs)
     except asyncio.CancelledError:
         logger.info("Server task cancelled, shutting down gracefully")
     except Exception as e:
@@ -135,24 +141,20 @@ if __name__ == "__main__":
             or "--stdio" in sys.argv
         )
 
-        # Force SSE mode if explicitly requested
-        use_sse = "--sse" in sys.argv
+        # Check for backward compatibility with SSE flag
+        if "--sse" in sys.argv:
+            logger.warning("SSE transport is deprecated, using streamable-http instead")
+            # Continue with streamable-http, don't use stdio
 
-        # TODO: refactor SSE for streamable-http
+        # Override stdio mode if streamable-http is explicitly requested
         use_streamable = "--streamable-http" in sys.argv
-
-        # Override stdio mode if SSE is explicitly requested
-        if use_sse or use_streamable:
+        if use_streamable:
             use_stdio = False
 
         loop = asyncio.get_event_loop()
         if use_stdio:
             logger.info("Using stdio transport for agent communication")
             main_task = asyncio.ensure_future(run_server("stdio"))
-        elif use_sse:
-            # SSE transport for backward compatibility
-            logger.info("Using SSE transport on port 8080")
-            main_task = asyncio.ensure_future(run_server("sse", port=8080, log_level="debug"))
         else:
             # Default to Streamable HTTP transport for standalone server mode
             logger.info("Using Streamable HTTP transport on port 8080")
