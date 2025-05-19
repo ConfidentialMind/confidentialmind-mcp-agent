@@ -1,0 +1,5 @@
+{
+  "mcp_servers": {
+    "agentTools": "src/tools/postgres_mcp/__main__.py"
+  }
+}
