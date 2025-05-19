@@ -121,7 +121,24 @@ async def test_health_endpoint():
                         status=data.get("status"),
                         database=data.get("database"),
                     )
-                    return data.get("status") == "healthy" and data.get("database") == True
+
+                    # Check if status is healthy
+                    status_healthy = data.get("status") == "healthy"
+
+                    # Check if database is connected - database is now an object with 'connected' field
+                    database_connected = False
+                    database_info = data.get("database")
+                    if isinstance(database_info, dict):
+                        database_connected = database_info.get("connected", False)
+
+                    # Optional: Check if LLM is connected - you might want to verify this as well
+                    llm_connected = False
+                    llm_info = data.get("llm")
+                    if isinstance(llm_info, dict):
+                        llm_connected = llm_info.get("connected", False)
+
+                    # Return overall health status
+                    return status_healthy and database_connected
                 else:
                     logger.error("Health endpoint failed", status=response.status)
                     return False
