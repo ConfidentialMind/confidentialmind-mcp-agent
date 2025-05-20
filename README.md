@@ -409,6 +409,7 @@ python -m src.agent.main serve --debug
 - For PostgreSQL MCP server documentation, see `src/tools/postgres_mcp/README.md`
 - For guidance on building MCP servers, see `guides/mcp_server_guide.md`
 - For details on ConfidentialMind connection management, see `guides/confidentialmind.md`
+- For a guide on containerizing MCP servers, see `guides/mcp_containerization.md`
 
 ## Resilience Features
 

@@ -20,7 +20,6 @@ RUN mkdir -p src/tools && \
   touch src/tools/__init__.py && \
   touch src/tools/postgres_mcp/__init__.py
 
-
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
