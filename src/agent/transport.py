@@ -148,15 +148,24 @@ class TransportManager:
             if not server_url:
                 raise ValueError(f"server_url required for API mode transport: {server_id}")
 
+            normalized_url = server_url.rstrip("/")
+
             # Handle URL path for streamable HTTP transport
-            if server_url.endswith("/sse"):
+            if normalized_url.endswith("/sse"):
                 # If URL still has /sse (from previous version), replace with /mcp
-                server_url = server_url.rsplit("/sse", 1)[0] + "/mcp"
+                server_url = normalized_url.rsplit("/sse", 1)[0] + "/mcp"
                 logger.info(f"TransportManager: Converted SSE URL to MCP URL: {server_url}")
-            elif not server_url.endswith("/mcp"):
+            elif not normalized_url.endswith("/mcp"):
                 # Ensure the URL has the /mcp path for streamable HTTP transport
-                server_url = server_url.rstrip("/") + "/mcp"
+                server_url = normalized_url + "/mcp"
                 logger.info(f"TransportManager: Appended /mcp to the URL: {server_url}")
+            else:
+                # URL already ends with /mcp (after normalization), use as is
+                server_url = normalized_url
+                logger.info(f"TransportManager: Using MCP URL as is: {server_url}")
+
+            # fixes temporary redirect spam
+            server_url = server_url + "/"
 
             self.transports[server_id] = StreamableHttpTransport(url=server_url)
             logger.info(
