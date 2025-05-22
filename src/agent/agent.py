@@ -788,13 +788,11 @@ class Agent:
             elif hasattr(result, "__str__"):
                 # For special MCP types, summarize them
                 result_str = str(result)
-                if len(result_str) > 500:
-                    result_str = result_str[:500] + "... (truncated)"
                 formatted += f"{result_str}\n"
             else:
                 # For other types, do a simple representation
                 formatted += f"Type: {type(result).__name__}\n"
-                formatted += f"Content: {self._safe_serialize(result)[:200]}...\n"
+                formatted += f"Content: {self._safe_serialize(result)}...\n"
 
             formatted += "---\n"
 
