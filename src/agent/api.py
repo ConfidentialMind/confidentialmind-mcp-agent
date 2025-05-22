@@ -92,17 +92,8 @@ class AgentComponents:
 
         # For local development, get MCP server URLs from environment
         if not self.is_stack_deployment:
-            # Get MCP server URLs from environment with a default
-            default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/mcp")
-
-            # Convert legacy SSE URLs to streamable HTTP format
-            if default_mcp_server.endswith("/sse"):
-                default_mcp_server = default_mcp_server.rsplit("/sse", 1)[0] + "/mcp"
-                logger.info(f"Converting legacy SSE URL to streamable HTTP: {default_mcp_server}")
-
-            self.mcp_servers = {"agentTools": default_mcp_server}
-
-            # Check for additional MCP servers specified as MCP_SERVER_NAME=url
+            # Get MCP server URLs from environment
+            mcp_env_servers = {}
             for key, value in os.environ.items():
                 if key.startswith("MCP_SERVER_") and value:
                     server_name = key[11:].lower()  # Remove "MCP_SERVER_" prefix and lowercase
@@ -113,7 +104,25 @@ class AgentComponents:
                             logger.info(
                                 f"Converting legacy SSE URL to streamable HTTP for {server_name}: {value}"
                             )
-                        self.mcp_servers[server_name] = value
+                        mcp_env_servers[server_name] = value
+
+            # Only use default if no environment-specified servers exist
+            if mcp_env_servers:
+                self.mcp_servers = mcp_env_servers
+                logger.info(
+                    f"AgentComponents: Found {len(self.mcp_servers)} MCP servers in environment"
+                )
+            else:
+                # Get default MCP server URL
+                default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/mcp")
+                # Convert legacy SSE URLs to streamable HTTP format
+                if default_mcp_server.endswith("/sse"):
+                    default_mcp_server = default_mcp_server.rsplit("/sse", 1)[0] + "/mcp"
+                    logger.info(
+                        f"Converting legacy SSE URL to streamable HTTP: {default_mcp_server}"
+                    )
+                self.mcp_servers = {"agentTools": default_mcp_server}
+                logger.info("AgentComponents: Using default MCP server configuration")
 
             logger.info(
                 f"AgentComponents: Found {len(self.mcp_servers)} MCP servers in environment"

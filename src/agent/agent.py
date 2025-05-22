@@ -300,6 +300,7 @@ class Agent:
             }}
             If no actions are needed, use "actions": [].
             If more info needed, add "needs_more_info": true, "follow_up_question": "...".
+            Do **NOT** put comments in the JSON.
             """
 
             # Call the LLM
@@ -788,13 +789,11 @@ class Agent:
             elif hasattr(result, "__str__"):
                 # For special MCP types, summarize them
                 result_str = str(result)
-                if len(result_str) > 500:
-                    result_str = result_str[:500] + "... (truncated)"
                 formatted += f"{result_str}\n"
             else:
                 # For other types, do a simple representation
                 formatted += f"Type: {type(result).__name__}\n"
-                formatted += f"Content: {self._safe_serialize(result)[:200]}...\n"
+                formatted += f"Content: {self._safe_serialize(result)}...\n"
 
             formatted += "---\n"
 

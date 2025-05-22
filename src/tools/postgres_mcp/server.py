@@ -6,6 +6,7 @@ from typing import Any, AsyncIterator
 
 from confidentialmind_core.config_manager import load_environment
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -138,7 +139,8 @@ async def execute_sql(sql_query: str, ctx: Context) -> list[dict]:
         raise RuntimeError("Database connection is not available yet. Please try again later.")
     except QueryValidationError as e:
         logger.warning(f"SQL query validation failed: {e}")
-        raise
+        # raise
+        raise ToolError(str(e))
     except Exception as e:
         logger.error(f"Failed to execute SQL query: {e}")
         raise RuntimeError(f"Could not execute SQL query: {e}")

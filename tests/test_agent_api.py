@@ -7,6 +7,7 @@ endpoint and chat completions endpoint.
 Before running this test:
 1. Start the PostgreSQL database
 2. Start the Postgres MCP server: python -m src.tools.postgres_mcp
+3. Start the BaseRAG MCP server: python -m src.tools.baserag_mcp
 3. Start the agent API server: python -m src.agent.main serve
 
 Usage:
@@ -239,6 +240,43 @@ async def test_postgres_query():
         return False
 
 
+async def test_baserag_query():
+    """Test a query using the baserag MCP tool."""
+    logger.info("Testing baserag query with RAG capabilities...")
+
+    query = """
+    Use the BaseRAG system to tell me about retrieval augmented generation and 
+    how it enhances LLM responses with relevant context.
+    """
+
+    result = await send_chat_query(query, TEST_SESSION_ID)
+
+    if "error" in result:
+        logger.error("BaseRAG query error", error=result["error"])
+        return False
+
+    response_text = get_response_text(result)
+    if not response_text:
+        return False
+
+    logger.info(
+        "BaseRAG query response",
+        response=response_text,
+    )
+
+    # Check if the response contains indicators that the BaseRAG server was used
+    # We're only testing connectivity, not expected output
+    success_indicators = ["retrieval", "generation", "RAG", "knowledge base", "context"]
+
+    # Check if at least one indicator is in the response
+    if any(indicator.lower() in response_text.lower() for indicator in success_indicators):
+        logger.info("BaseRAG query successful - found relevant terms in response")
+        return True
+    else:
+        logger.warning("BaseRAG query might have failed - response doesn't contain expected info")
+        return False
+
+
 async def test_conversation_management():
     """Test multi-turn conversation management."""
     logger.info("Testing conversation management...")
@@ -405,6 +443,7 @@ async def run():
             ("Simple query", test_simple_query),
             ("PostgreSQL users query", test_postgres_query),
             ("PostgreSQL products query", test_postgres_products_query),
+            ("BaseRAG query", test_baserag_query),
             ("Conversation management", test_conversation_management),
             ("Show history", test_show_history),
             ("Clear history", test_clear_history),

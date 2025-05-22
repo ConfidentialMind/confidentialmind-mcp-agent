@@ -1,0 +1,6 @@
+{
+  "mcp_servers": {
+    "postgres": "src/tools/postgres_mcp/__main__.py",
+    "baserag": "src/tools/baserag_mcp/__main__.py"
+  }
+}

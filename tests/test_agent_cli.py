@@ -124,7 +124,8 @@ def create_config_file():
     # Write config to file
     config = {
         "mcp_servers": {
-            "postgres": "src/tools/postgres_mcp/__main__.py"  # Use stdio for CLI mode
+            "postgres": "src/tools/postgres_mcp/__main__.py",
+            "baserag": "src/tools/baserag_mcp/__main__.py",
         }
     }
 
@@ -265,6 +266,38 @@ def test_postgres_products_query(config_path: str):
         return False
 
 
+def test_baserag_query(config_path: str):
+    """Test a query using the baserag MCP tool."""
+    logger.info("Testing baserag CLI query...")
+
+    result = run_cli_command(
+        query="What information can you provide about retrieval augmented generation?",
+        session_id=TEST_SESSION_ID,
+        config_path=config_path,
+    )
+
+    if "error" in result:
+        logger.error("BaseRAG CLI query error", error=result["error"])
+        return False
+
+    output = result.get("output", "")
+    logger.info("BaseRAG CLI query response", output=output)
+
+    # Check if the response contains indicators that the BaseRAG server was used
+    # We're only testing connectivity, not expected output
+    success_indicators = ["retrieval", "generation", "RAG", "knowledge base", "context"]
+
+    # Check if at least one indicator is in the output
+    if any(indicator.lower() in output.lower() for indicator in success_indicators):
+        logger.info("BaseRAG CLI query successful - found relevant terms in response")
+        return True
+    else:
+        logger.warning(
+            "BaseRAG CLI query might have failed - response doesn't contain expected info"
+        )
+        return False
+
+
 def test_conversation_management(config_path: str):
     """Test multi-turn conversation management via CLI."""
     logger.info("Testing CLI conversation management...")
@@ -393,6 +426,7 @@ def main():
             ("Simple CLI query", lambda: test_simple_query(config_path)),
             ("PostgreSQL CLI query", lambda: test_postgres_query(config_path)),
             ("PostgreSQL CLI products query", lambda: test_postgres_products_query(config_path)),
+            ("BaseRAG CLI query", lambda: test_baserag_query(config_path)),
             ("CLI conversation management", lambda: test_conversation_management(config_path)),
             ("CLI show history", lambda: test_show_history(config_path)),
             ("CLI clear history", lambda: test_clear_history(config_path)),

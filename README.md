@@ -103,8 +103,8 @@ In stack deployment mode:
 
 ### Environment Variables
 
-- `AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
-- `MCP_SERVER_*`: Additional MCP servers in the format MCP_SERVER_NAME=url
+- `MCP_SERVER_*`: MCP servers in the format MCP_SERVER_NAME=url
+- (*Deprecating*)`AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
 - `DB_CONFIG_ID`: Database connector config ID (default: DATABASE)
 - `LLM_CONFIG_ID`: LLM service config ID (default: LLM)
 - `CONFIDENTIAL_MIND_LOCAL_CONFIG`: Set to "False" for stack deployment mode
@@ -116,8 +116,8 @@ You can provide a JSON configuration file with server definitions:
 ```json
 {
   "mcp_servers": {
-    "postgres": "src/tools/postgres_mcp/__main__.py", // For CLI mode (path to script)
-    "other_server": "path/to/other/server/script.py"
+    "postgres": "src/tools/postgres_mcp/__main__.py", // Using stdio in CLI mode
+    "baserag": "src/tools/baserag_mcp/__main__.py"
   }
 }
 ```
@@ -128,7 +128,7 @@ Or for API mode:
 {
   "mcp_servers": {
     "postgres": "http://0.0.0.0:8080/mcp", // Using streamable-HTTP endpoint
-    "other_server": "http://other-server:8080/mcp"
+    "other_server": "http://0.0.0.0:8081/mcp"
   }
 }
 ```
@@ -387,6 +387,7 @@ The agent uses a modular architecture with these key components:
 To test the API mode:
 
 - Initialize the Postgres MCP server: `python -m src.tools.postgres_mcp`
+- Initialize the Baserag MCP server: `python -m src.tools.baserag_mcp`
 - Initialize the agent in API mode: `python -m src.agent.main serve`
 - Run the test: `python -m tests.test_agent_api`
 
@@ -407,6 +408,7 @@ python -m src.agent.main serve --debug
 
 - For more details on the agent implementation, see `src/agent/README.md`
 - For PostgreSQL MCP server documentation, see `src/tools/postgres_mcp/README.md`
+- For BaseRAG MCP server documentation, see `src/tools/baserag_mcp/README.md`
 - For guidance on building MCP servers, see `guides/mcp_server_guide.md`
 - For details on ConfidentialMind connection management, see `guides/confidentialmind.md`
 - For a guide on containerizing MCP servers, see `guides/mcp_containerization.md`
