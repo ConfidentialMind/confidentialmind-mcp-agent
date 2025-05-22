@@ -52,9 +52,19 @@ class BaseRAGClient:
             endpoint = "/" + endpoint
         url = f"{base_url}{endpoint}"
 
+        # NOTE: Potentially parameterize this for slower RAG systems
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
         try:
             logger.info(f"Making {method} request to {url}")
-            async with session.request(method, url, json=json_data, params=params) as response:
+            async with session.request(
+                method,
+                url,
+                json=json_data,
+                params=params,
+                timeout=timeout,
+                headers=session.headers,
+                allow_redirects=True,
+            ) as response:
                 # Log the response status for debugging
                 logger.info(f"API response status: {response.status}")
 
