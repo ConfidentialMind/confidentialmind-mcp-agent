@@ -1,45 +1,26 @@
-# ConfidentialMind MCP Agent
+# FastMCP Agent
 
-A flexible FastMCP client application for interacting with Model Context Protocol (MCP) servers to execute complex workflows. The agent supports both CLI and API modes with configurable transport options and includes an OpenAI API-compatible endpoint.
-
-## Overview
-
-The ConfidentialMind MCP Agent serves as a bridge between users and MCP servers, providing a unified interface for accessing various capabilities. It can:
-
-- Process natural language queries and convert them into structured actions
-- Connect to multiple MCP servers simultaneously
-- Execute complex workflows with automatic error handling and replanning
-- Maintain conversation context across sessions
-- Operate as either a CLI tool or an API server with OpenAI compatibility
+A flexible FastMCP client application that interacts with MCP servers to execute complex workflows using either CLI or API mode. The agent supports configurable transport options (stdio/streamable-HTTP) and includes an OpenAI API-compatible endpoint.
 
 ## Features
 
 - **Dual-Mode Operation**:
-
   - **CLI Mode**: Run as a command-line tool using stdio transport for local development
   - **API Mode**: Run as a standalone server with an OpenAI-compatible API endpoint using streamable-HTTP transport
-
 - **ConfidentialMind Integration**:
-
   - Automatic connector registration and URL discovery in stack deployment
   - Background polling for service URLs in production environments
   - Graceful operation even when services are not immediately available
-
 - **Flexible Transport Configuration**:
-
   - Support for multiple MCP servers via configurable transports
   - Dynamic transport selection based on runtime mode
   - Automatic conversion of legacy SSE URLs to streamable-HTTP
-
 - **Robust Database Integration**:
-
   - Automatic schema validation and creation
   - Connection pooling with reconnection logic
   - PostgreSQL-based session management
-
 - **Intelligent Agent Workflow**:
-
-  - Multi-stage processing pipeline:
+  - **Multi-stage processing**:
     1. Initialize context - discover available tools and resources
     2. Parse query - use LLM to plan actions
     3. Execute MCP actions - call tools on servers
@@ -47,7 +28,6 @@ The ConfidentialMind MCP Agent serves as a bridge between users and MCP servers,
     5. Generate response - create final response based on results
   - Handles action failures with automatic replanning
   - Maintains conversation history for context
-
 - **OpenAI Compatibility**:
   - Drop-in replacement for OpenAI's chat completions API
   - Session management via headers or cookies
@@ -56,7 +36,7 @@ The ConfidentialMind MCP Agent serves as a bridge between users and MCP servers,
 
 ```bash
 # Clone the repository
-git clone https://github.com/ConfidentialMind/confidentialmind-mcp-agent.git
+git clone git@github.com:ConfidentialMind/confidentialmind-mcp-agent.git
 
 # Navigate to project root
 cd confidentialmind-mcp-agent
@@ -104,7 +84,7 @@ In stack deployment mode:
 ### Environment Variables
 
 - `MCP_SERVER_*`: MCP servers in the format MCP_SERVER_NAME=url
-- (*Deprecating*)`AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
+- (*Deprecating*) `AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
 - `DB_CONFIG_ID`: Database connector config ID (default: DATABASE)
 - `LLM_CONFIG_ID`: LLM service config ID (default: LLM)
 - `CONFIDENTIAL_MIND_LOCAL_CONFIG`: Set to "False" for stack deployment mode
@@ -116,8 +96,7 @@ You can provide a JSON configuration file with server definitions:
 ```json
 {
   "mcp_servers": {
-    "postgres": "src/tools/postgres_mcp/__main__.py", // Using stdio in CLI mode
-    "baserag": "src/tools/baserag_mcp/__main__.py"
+    "agentTools": "src/tools/postgres/__main__.py" // For CLI mode (path to script)
   }
 }
 ```
@@ -127,8 +106,7 @@ Or for API mode:
 ```json
 {
   "mcp_servers": {
-    "postgres": "http://0.0.0.0:8080/mcp", // Using streamable-HTTP endpoint
-    "other_server": "http://0.0.0.0:8081/mcp"
+    "agentTools": "http://0.0.0.0:8080/mcp" // Using streamable-HTTP endpoint
   }
 }
 ```
@@ -255,7 +233,7 @@ Response:
   },
   "mcp_servers": {
     "count": 2,
-    "servers": ["postgres", "otherServer"]
+    "servers": ["postgres", "agentTools"]
   },
   "timestamp": "2023-08-18T12:34:56.789Z"
 }
@@ -308,24 +286,11 @@ The agent follows a multi-stage workflow for processing queries:
    - Format data appropriately for the user
    - Include error explanations if things went wrong
 
-## Available MCP Servers
-
-The repository includes the following MCP servers:
+## Connecting MCP Servers
 
 ### PostgreSQL MCP Server
 
-A FastMCP server providing read-only access to PostgreSQL databases. It allows:
-
-- Schema inspection via the `postgres://schemas` resource
-- SQL query execution via the `execute_sql` tool (read-only)
-
-For more details on the PostgreSQL MCP server, see `src/tools/postgres_mcp/README.md`.
-
-Additional MCP servers will be added in the future to expand the agent's capabilities.
-
-## Connecting MCP Servers
-
-To connect the agent to an MCP server:
+The agent can connect to the included PostgreSQL MCP server for database access:
 
 ```bash
 # Start the PostgreSQL MCP server
@@ -343,24 +308,6 @@ Example `postgres_config.json`:
     "postgres": "http://localhost:8080/mcp"
   }
 }
-```
-
-## Docker Support
-
-Docker configurations are provided for both the agent and PostgreSQL MCP server:
-
-```bash
-# Build the agent container
-docker build -f docker/agent.Dockerfile -t confidentialmind-mcp-agent .
-
-# Build the PostgreSQL MCP server container
-docker build -f docker/postgres-mcp.Dockerfile -t confidentialmind-postgres-mcp .
-
-# Run the PostgreSQL MCP server
-docker run -p 8080:8080 -e PG_HOST=host.docker.internal confidentialmind-postgres-mcp
-
-# Run the agent in API mode
-docker run -p 8000:8080 -e AGENT_TOOLS_URL=http://host.docker.internal:8080/mcp confidentialmind-mcp-agent
 ```
 
 ## Development
@@ -384,10 +331,12 @@ The agent uses a modular architecture with these key components:
 
 ### Running Tests
 
+High-level, functional, and end-to-end tests that mimic end user usage are in `tests/`.
+
 To test the API mode:
 
 - Initialize the Postgres MCP server: `python -m src.tools.postgres_mcp`
-- Initialize the Baserag MCP server: `python -m src.tools.baserag_mcp`
+- Initialize the BaseRAG MCP server: `python -m src.tools.baserag_mcp`
 - Initialize the agent in API mode: `python -m src.agent.main serve`
 - Run the test: `python -m tests.test_agent_api`
 
@@ -403,15 +352,6 @@ Enable debug logging with the `--debug` flag in any command mode:
 python -m src.agent.main query "Debug this" --debug
 python -m src.agent.main serve --debug
 ```
-
-## Additional Documentation
-
-- For more details on the agent implementation, see `src/agent/README.md`
-- For PostgreSQL MCP server documentation, see `src/tools/postgres_mcp/README.md`
-- For BaseRAG MCP server documentation, see `src/tools/baserag_mcp/README.md`
-- For guidance on building MCP servers, see `guides/mcp_server_guide.md`
-- For details on ConfidentialMind connection management, see `guides/confidentialmind.md`
-- For a guide on containerizing MCP servers, see `guides/mcp_containerization.md`
 
 ## Resilience Features
 

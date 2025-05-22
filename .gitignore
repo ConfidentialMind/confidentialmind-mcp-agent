@@ -6,9 +6,11 @@ __pycache__/
 .ruff_cache/
 .venv/
 .env
-.DS_Store
 *.egg-info/
 *.egg
+**/.DS_Store
 
-CLAUDE.md
-
+agent_instructions/
+agent_references/
+agent_prompts/
+.claude/
