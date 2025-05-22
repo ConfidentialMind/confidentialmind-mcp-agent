@@ -120,13 +120,13 @@ Example `config.json` for the agent in API mode:
 - In stack deployment, internal service communication is used
 - Consider network policies to restrict access to the BaseRAG API
 
-## Development and Testing
+## Testing
 
 To test the server functionality:
 
 - Make sure the BaseRAG API is running
-- Start the BaseRAG MCP server
-- Use a FastMCP client to connect and test the tools
+- Start the BaseRAG MCP server: `python -m src.tools.baserag_mcp`
+- Run the test: `python -m tests.test_baserag_mcp`
 
 ## Handling Key Requirements
 
