@@ -1,0 +1,55 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  generateName: clone-build-push-service-run-
+spec:
+  pipelineRef:
+    name: clone-build-push
+  podTemplate:
+    securityContext:
+      fsGroup: 65532
+  taskRunSpecs:
+    - pipelineTaskName: deploy
+      taskServiceAccountName: pipeline-deploy
+    - pipelineTaskName: clone-repo
+      taskServiceAccountName: pipeline-deploy
+    - pipelineTaskName: clone-repo-stack
+      taskServiceAccountName: pipeline-deploy
+  workspaces:
+    - name: shared-data
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 2Gi
+  params:
+    - name: src-path
+      value: .
+    - name: registry-host
+      value: confidentialmind.azurecr.io/main/services
+    - name: image-reference
+      value: mcp-baserag:0.1.0
+    - name: service-name
+      value: mcp-postgres
+    - name: values_file
+      value: values.yaml
+    - name: release-namespace
+      value: api-services
+    - name: use-git
+      value: "true"
+    - name: git-repo
+      value: git@github.com:ConfidentialMind/confidentialmind-mcp-agent.git
+    - name: branch
+      value: rag-mcp
+    - name: stack-branch
+      value: dev
+    - name: skip-deploy
+      value: "true"
+    - name: dockerfile
+      value: ./docker/postgres-mcp.Dockerfile
+    - name: build-args
+      value:
+        - --insecure
+        - --cache
