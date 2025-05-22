@@ -3,7 +3,8 @@ import json
 
 import asyncpg
 from fastmcp import Client
-from fastmcp.exceptions import ClientError
+from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.exceptions import ClientError, ToolError
 from mcp.types import TextContent, TextResourceContents
 
 from .logger import logger
@@ -89,7 +90,8 @@ async def cleanup_test_tables(dsn: str) -> None:
 
 async def run():
     """Test the Postgres MCP server using FastMCP Client."""
-    server_url = "http://localhost:8080/sse"
+    # Using streamable HTTP transport instead of SSE
+    server_url = "http://localhost:8080/mcp"
     database_dsn = "postgresql://postgres:postgres@localhost:5432/test_db"
 
     try:
@@ -98,8 +100,11 @@ async def run():
 
         logger.info("Connecting to Postgres MCP server", url=server_url, client="FastMCP")
 
+        # Create the transport
+        transport = StreamableHttpTransport(url=server_url)
+
         # Create the FastMCP Client context manager. It handles connection and initialization.
-        async with Client(server_url) as client:
+        async with Client(transport) as client:
             logger.info("Connection established and initialized with FastMCP Client")
 
             # List available prompts
@@ -341,7 +346,7 @@ async def run():
                 await client.call_tool("execute_sql", {"sql_query": write_query})
                 logger.warning("Write query did not fail as expected!")
 
-            except ClientError as e:
+            except (ClientError, ToolError) as e:
                 logger.info("Write query properly rejected by tool", error=str(e))
                 logger.info("Read-only validation working correctly on server-side")
             except Exception as e:
@@ -361,7 +366,7 @@ async def run():
                 await client.call_tool("execute_sql", {"sql_query": sneaky_query})
                 logger.warning("Comment with disallowed keywords did not fail as expected!")
 
-            except ClientError as e:
+            except (ClientError, ToolError) as e:
                 logger.info(
                     "Query with disallowed keywords in comment properly rejected", error=str(e)
                 )
