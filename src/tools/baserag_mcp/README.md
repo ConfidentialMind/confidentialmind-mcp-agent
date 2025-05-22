@@ -124,7 +124,7 @@ Example `config.json` for the agent in API mode:
 
 To test the server functionality:
 
-- Make sure the BaseRAG API is running
+- Make sure the BaseRAG API application is running:
 - Start the BaseRAG MCP server: `python -m src.tools.baserag_mcp`
 - Run the test: `python -m tests.test_baserag_mcp`
 

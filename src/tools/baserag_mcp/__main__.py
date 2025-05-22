@@ -156,7 +156,7 @@ if __name__ == "__main__":
             # Default to Streamable HTTP transport for standalone server mode
             logger.info("Using Streamable HTTP transport on port 8080")
             main_task = asyncio.ensure_future(
-                run_server("streamable-http", port=8080, log_level="debug")
+                run_server("streamable-http", port=8081, log_level="debug")
             )
 
         loop.run_until_complete(main_task)

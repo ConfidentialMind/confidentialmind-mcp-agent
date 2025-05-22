@@ -83,8 +83,8 @@ In stack deployment mode:
 
 ### Environment Variables
 
-- `AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
-- `MCP_SERVER_*`: Additional MCP servers in the format MCP_SERVER_NAME=url
+- `MCP_SERVER_*`: MCP servers in the format MCP_SERVER_NAME=url
+- (*Deprecating*) `AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
 - `DB_CONFIG_ID`: Database connector config ID (default: DATABASE)
 - `LLM_CONFIG_ID`: LLM service config ID (default: LLM)
 - `CONFIDENTIAL_MIND_LOCAL_CONFIG`: Set to "False" for stack deployment mode
@@ -336,6 +336,7 @@ High-level, functional, and end-to-end tests that mimic end user usage are in `t
 To test the API mode:
 
 - Initialize the Postgres MCP server: `python -m src.tools.postgres_mcp`
+- Initialize the BaseRAG MCP server: `python -m src.tools.baserag_mcp`
 - Initialize the agent in API mode: `python -m src.agent.main serve`
 - Run the test: `python -m tests.test_agent_api`
 

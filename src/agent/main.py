@@ -40,15 +40,38 @@ async def run_agent(
     """Run the agent with the given query."""
     # Set default MCP servers if not provided
     if mcp_servers is None:
-        # Default to streamable HTTP transport URL
-        default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/mcp")
+        # Check for environment-defined MCP servers
+        env_mcp_servers = {}
+        for key, value in os.environ.items():
+            if key.startswith("MCP_SERVER_") and value:
+                server_name = key[11:].lower()  # Remove "MCP_SERVER_" prefix
+                env_mcp_servers[server_name] = value
 
-        # Handle legacy SSE URLs
-        if default_mcp_server.endswith("/sse"):
-            default_mcp_server = default_mcp_server.rsplit("/sse", 1)[0] + "/mcp"
-            logger.info(f"Converting legacy SSE URL to streamable HTTP: {default_mcp_server}")
+        # If environment variables exist, use those
+        if env_mcp_servers:
+            mcp_servers = env_mcp_servers
+            logger.info(f"Using {len(mcp_servers)} MCP servers from environment variables")
+        else:
+            # Default to streamable HTTP transport URL (for API mode)
+            # or default script path (for CLI mode)
+            if mode == "api":
+                default_mcp_server = os.environ.get("AGENT_TOOLS_URL", "http://localhost:8080/mcp")
 
-        mcp_servers = {"agentTools": default_mcp_server}
+                # Handle legacy SSE URLs
+                if default_mcp_server.endswith("/sse"):
+                    default_mcp_server = default_mcp_server.rsplit("/sse", 1)[0] + "/mcp"
+                    logger.info(
+                        f"Converting legacy SSE URL to streamable HTTP: {default_mcp_server}"
+                    )
+
+                mcp_servers = {"agentTools": default_mcp_server}
+            else:  # CLI mode
+                # For CLI mode, default to a script path instead of URL
+                default_script_path = os.environ.get(
+                    "AGENT_DEFAULT_SCRIPT", "src/tools/postgres_mcp/__main__.py"
+                )
+                mcp_servers = {"postgres": default_script_path}
+                logger.info(f"Using default MCP script: {default_script_path}")
 
     # Initialize database
     db_url = await fetch_db_url(db_config_id)
