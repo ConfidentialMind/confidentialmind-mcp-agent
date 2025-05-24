@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 from confidentialmind_core.config_manager import load_environment
-from fastmcp import Context, FastMCP
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -89,14 +89,16 @@ mcp_server = FastMCP(
 
 
 @mcp_server.resource("postgres://schemas")
-async def get_schemas(ctx: Context) -> dict[str, list[dict]]:
+async def get_schemas() -> dict[str, list[dict]]:
     """
     Retrieves the schemas (table names, columns, types) for all tables
     accessible by the connected database user. Excludes system tables.
     """
-    pool = ctx.request_context.lifespan_context.get("db_pool")
+    # Use direct pool access instead of context
+    pool = ConnectionManager.get_pool()
+
     if not pool:
-        logger.error("Database pool not available in context.")
+        logger.error("Database pool not available.")
         raise RuntimeError("Database connection is not available yet. Please try again later.")
 
     client = DatabaseClient(pool)
@@ -110,7 +112,7 @@ async def get_schemas(ctx: Context) -> dict[str, list[dict]]:
 
 
 @mcp_server.tool()
-async def execute_sql(sql_query: str, ctx: Context) -> list[dict]:
+async def execute_sql(sql_query: str) -> list[dict]:
     """
     Executes a read-only SQL query (must start with SELECT, WITH, or EXPLAIN
     and contain no modification keywords like INSERT, UPDATE, DELETE, CREATE, etc.)
@@ -119,27 +121,27 @@ async def execute_sql(sql_query: str, ctx: Context) -> list[dict]:
 
     Args:
         sql_query: The read-only SQL query string to execute.
-        ctx: The MCP context (automatically injected).
 
     Returns:
         A list of dictionaries, where each dictionary represents a row
         with column names as keys.
     """
-    pool = ctx.request_context.lifespan_context.get("db_pool")
+    # Use direct pool access instead of context
+    pool = ConnectionManager.get_pool()
+
     if not pool:
-        logger.error("Database pool not available in context for execute_sql.")
+        logger.error("Database pool not available for execute_sql.")
         raise RuntimeError("Database connection is not available yet. Please try again later.")
 
     client = DatabaseClient(pool)
     try:
         results = await client.execute_readonly_query(sql_query)
-        await ctx.info(f"Executed query successfully, returned {len(results)} rows.")
+        logger.info(f"Executed query successfully, returned {len(results)} rows.")
         return results
     except DatabaseUnavailableError:
         raise RuntimeError("Database connection is not available yet. Please try again later.")
     except QueryValidationError as e:
         logger.warning(f"SQL query validation failed: {e}")
-        # raise
         raise ToolError(str(e))
     except Exception as e:
         logger.error(f"Failed to execute SQL query: {e}")
