@@ -94,9 +94,11 @@ async def get_schemas(ctx: Context) -> dict[str, list[dict]]:
     Retrieves the schemas (table names, columns, types) for all tables
     accessible by the connected database user. Excludes system tables.
     """
-    pool = ctx.request_context.lifespan_context.get("db_pool")
+    # Use direct pool access instead of context
+    pool = ConnectionManager.get_pool()
+
     if not pool:
-        logger.error("Database pool not available in context.")
+        logger.error("Database pool not available.")
         raise RuntimeError("Database connection is not available yet. Please try again later.")
 
     client = DatabaseClient(pool)
@@ -125,9 +127,11 @@ async def execute_sql(sql_query: str, ctx: Context) -> list[dict]:
         A list of dictionaries, where each dictionary represents a row
         with column names as keys.
     """
-    pool = ctx.request_context.lifespan_context.get("db_pool")
+    # Use direct pool access instead of context
+    pool = ConnectionManager.get_pool()
+
     if not pool:
-        logger.error("Database pool not available in context for execute_sql.")
+        logger.error("Database pool not available for execute_sql.")
         raise RuntimeError("Database connection is not available yet. Please try again later.")
 
     client = DatabaseClient(pool)
@@ -139,7 +143,6 @@ async def execute_sql(sql_query: str, ctx: Context) -> list[dict]:
         raise RuntimeError("Database connection is not available yet. Please try again later.")
     except QueryValidationError as e:
         logger.warning(f"SQL query validation failed: {e}")
-        # raise
         raise ToolError(str(e))
     except Exception as e:
         logger.error(f"Failed to execute SQL query: {e}")
