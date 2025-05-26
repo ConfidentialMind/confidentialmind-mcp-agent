@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import logging
 import os
@@ -110,7 +111,43 @@ async def run_server(transport_type, **kwargs):
         logger.info("Server shutdown complete.")
 
 
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Postgres MCP Server")
+    parser.add_argument(
+        "--stdio", action="store_true", help="Use stdio transport for agent communication"
+    )
+    parser.add_argument(
+        "--streamable-http", action="store_true", help="Use streamable HTTP transport (default)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8080, help="Port for HTTP transport (default: 8080)"
+    )
+    parser.add_argument(
+        "--host", type=str, default="0.0.0.0", help="Host for HTTP transport (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="info",
+        choices=["debug", "info", "warning", "error"],
+        help="Log level (default: info)",
+    )
+
+    # Handle legacy --sse flag
+    if "--sse" in sys.argv:
+        logger.warning("SSE transport is deprecated, using streamable-http instead")
+        sys.argv.remove("--sse")
+        if "--streamable-http" not in sys.argv:
+            sys.argv.append("--streamable-http")
+
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    # Parse command line arguments
+    args = parse_arguments()
+
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -133,22 +170,13 @@ if __name__ == "__main__":
         )
 
     try:
-        # Modified logic for transport selection
-        # Only use stdio if explicitly requested or when launched as a subprocess
-        use_stdio = (
-            "FastMCP_TRANSPORT" in os.environ
-            and os.environ["FastMCP_TRANSPORT"] == "stdio"
-            or "--stdio" in sys.argv
+        # Determine transport type based on arguments and environment
+        use_stdio = args.stdio or (
+            "FastMCP_TRANSPORT" in os.environ and os.environ["FastMCP_TRANSPORT"] == "stdio"
         )
 
-        # Check for backward compatibility with SSE flag
-        if "--sse" in sys.argv:
-            logger.warning("SSE transport is deprecated, using streamable-http instead")
-            # Continue with streamable-http, don't use stdio
-
         # Override stdio mode if streamable-http is explicitly requested
-        use_streamable = "--streamable-http" in sys.argv
-        if use_streamable:
+        if args.streamable_http:
             use_stdio = False
 
         loop = asyncio.get_event_loop()
@@ -156,10 +184,12 @@ if __name__ == "__main__":
             logger.info("Using stdio transport for agent communication")
             main_task = asyncio.ensure_future(run_server("stdio"))
         else:
-            # Default to Streamable HTTP transport for standalone server mode
-            logger.info("Using Streamable HTTP transport on port 8080")
+            # Use streamable HTTP transport with specified port
+            logger.info(f"Using Streamable HTTP transport on {args.host}:{args.port}")
             main_task = asyncio.ensure_future(
-                run_server("streamable-http", port=8080, log_level="debug")
+                run_server(
+                    "streamable-http", port=args.port, host=args.host, log_level=args.log_level
+                )
             )
 
         loop.run_until_complete(main_task)
