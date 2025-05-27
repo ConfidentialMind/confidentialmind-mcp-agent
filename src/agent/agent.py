@@ -482,6 +482,15 @@ class Agent:
         """Replan actions based on execution errors."""
         logger.info("Replanning actions due to execution issues...")
 
+        if state.replan_count >= state.max_replan_attempts:
+            logger.error(
+                f"Reached maximum replanning attempts ({state.max_replan_attempts}). Stopping execution."
+            )
+            state.error = f"Failed after {state.max_replan_attempts} replanning attempts. Last error: {state.execution_context.get('last_error', 'Unknown error')}"
+            state.requires_replanning = False
+            state.planned_actions = state.planned_actions[: state.current_action_index]
+            return state
+
         last_error = state.execution_context.get("last_error", "Unknown error")
         schema_qualification_needed = state.execution_context.get(
             "schema_qualification_needed", False
@@ -586,6 +595,10 @@ class Agent:
             state.current_action_index = max(
                 0, state.current_action_index - 1
             )  # Reset index to retry/continue
+
+            # Increment replan counter
+            state.replan_count += 1
+
             logger.info(
                 f"Replanned starting from action {state.current_action_index + 1} with {len(new_actions)} new action(s)."
             )
@@ -969,6 +982,15 @@ class Agent:
                     while state.current_action_index < len(state.planned_actions):
                         state = await self._execute_mcp_actions(state)
                         state = await self._evaluate_results(state)
+
+                        if (
+                            state.requires_replanning
+                            and state.replan_count >= state.max_replan_attempts
+                        ):
+                            logger.error(
+                                f"Maximum replanning attempts ({state.max_replan_attempts}) reached."
+                            )
+                            break
 
                         if state.requires_replanning:
                             state = await self._replan_actions(state)

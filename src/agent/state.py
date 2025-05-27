@@ -28,3 +28,5 @@ class AgentState(BaseModel):
     follow_up_question: Optional[str] = None
     execution_context: Dict[str, Any] = Field(default_factory=dict)
     requires_replanning: bool = False
+    replan_count: int = 0
+    max_replan_attempts: int = 5  # TODO: parameterize this to CM SDK later

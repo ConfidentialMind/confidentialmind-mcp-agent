@@ -30,7 +30,7 @@ spec:
     - name: registry-host
       value: confidentialmind.azurecr.io/main/services
     - name: image-reference
-      value: mcp-agent:0.1.5
+      value: mcp-agent:0.1.6
     - name: service-name
       value: mcp-agent
     - name: values_file
