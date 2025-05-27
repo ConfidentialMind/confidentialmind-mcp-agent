@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 from contextlib import AsyncExitStack
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from confidentialmind_core.config_manager import load_environment
 from fastmcp.exceptions import ClientError
@@ -112,7 +112,239 @@ class Agent:
         """Context manager exit with proper cleanup."""
         await self._exit_stack.__aexit__(exc_type, exc_val, exc_tb)
 
-    # --- Core Workflow Methods ---
+    # --- Streaming Support ---
+
+    async def run_streaming(
+        self, query: str, session_id: Optional[str] = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Execute agent workflow with streaming response generation.
+
+        Yields:
+            Dict containing workflow updates and final streaming response
+        """
+        logger.info(f"Starting streaming agent run for query: '{query[:50]}...'")
+
+        try:
+            # Execute all stages up to response generation normally
+            state = await self._execute_workflow_until_response(query, session_id)
+
+            # If there was an error in the workflow, yield it and return
+            if state.error:
+                yield {
+                    "type": "error",
+                    "error": state.error,
+                    "response": state.response or f"Error: {state.error}",
+                }
+                return
+
+            # Yield initial workflow status
+            yield {
+                "type": "workflow_status",
+                "stage": "response_generation",
+                "thoughts": state.thoughts,
+                "actions_executed": len(
+                    [a for a in state.planned_actions[: state.current_action_index]]
+                ),
+                "total_actions": len(state.planned_actions),
+            }
+
+            # Stream the final response generation
+            async for chunk in self._generate_response_streaming(state):
+                yield chunk
+
+        except Exception as e:
+            logger.error(f"Error during streaming agent execution: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "error": str(e),
+                "response": "I encountered an error processing your request. Please try again or contact support if the issue persists.",
+            }
+
+    async def _execute_workflow_until_response(
+        self, query: str, session_id: Optional[str] = None
+    ) -> AgentState:
+        """Execute workflow stages 1-5 (everything except response generation)"""
+
+        # Update connection status
+        self._db_connected = self.db.is_connected()
+        self._llm_connected = self.llm.is_connected()
+        self._has_tools = len(self.transport_manager.get_all_clients()) > 0
+
+        # Generate or use session ID
+        definite_session_id = session_id or str(uuid.uuid4())
+        logger.info(f"Session ID: {definite_session_id}")
+
+        # Load history if database is connected
+        await self._load_history(definite_session_id)
+
+        # Handle management commands
+        if query.strip().lower() == "clear history":
+            if self._db_connected:
+                await self.db.clear_history(definite_session_id)
+                return AgentState(
+                    query=query, session_id=definite_session_id, response="History cleared."
+                )
+            else:
+                return AgentState(
+                    query=query,
+                    session_id=definite_session_id,
+                    response="I'm running in stateless mode without access to database. No history to clear.",
+                )
+
+        if query.strip().lower() == "show history":
+            history_text = "History:\n" + (
+                "\n".join(map(str, self.current_history)) if self.current_history else "(empty)"
+            )
+            if not self._db_connected:
+                history_text += "\n\n*Note: I'm running in stateless mode without database access. This is the in-memory history for this session only.*"
+
+            return AgentState(query=query, session_id=definite_session_id, response=history_text)
+
+        # Save user message (to memory even if DB not connected)
+        user_message = Message(role="user", content=query)
+        await self._save_message(definite_session_id, user_message)
+
+        # Initialize state
+        state = AgentState(query=query, session_id=definite_session_id)
+
+        # If LLM is not connected, return error state
+        if not self._llm_connected:
+            state.error = "LLM service unavailable"
+            state.response = "I'm currently unable to process your request as my language model service is unavailable. Please try again later or contact support."
+            return state
+
+        # Execute workflow stages 1-5
+        state = await self._initialize_context(state)
+
+        # Skip parsing if there are no available tools
+        if not self._has_tools:
+            # If no tools available, set up for simple response
+            logger.info("No MCP clients available, will generate simple response")
+            state.execution_context["simple_mode"] = True
+            return state
+
+        if not state.error:
+            state = await self._parse_query(state)
+
+            # Execute actions if any were planned
+            if state.planned_actions and not state.error:
+                while state.current_action_index < len(state.planned_actions):
+                    state = await self._execute_mcp_actions(state)
+                    state = await self._evaluate_results(state)
+
+                    if (
+                        state.requires_replanning
+                        and state.replan_count >= state.max_replan_attempts
+                    ):
+                        logger.error(
+                            f"Maximum replanning attempts ({state.max_replan_attempts}) reached."
+                        )
+                        break
+
+                    if state.requires_replanning:
+                        state = await self._replan_actions(state)
+                    elif state.error:
+                        break
+
+        return state
+
+    async def _generate_response_streaming(
+        self, state: AgentState
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Generate streaming response using LLM streaming capabilities"""
+
+        logger.info("Starting streaming response generation")
+
+        try:
+            # Handle simple mode (no tools available)
+            if state.execution_context.get("simple_mode", False):
+                prompt = f"""
+                Answer the user's question as best you can without any external tools.
+                
+                User Query: {state.query}
+                
+                Conversation History:
+                {self._format_conversation_history(self.current_history)}
+                
+                Note: I currently don't have access to any external tools, so I can only answer based on my general knowledge.
+                """
+            else:
+                # Build the same prompt as _generate_response()
+                formatted_results = self._format_results(state.mcp_results)
+                conversation_context = self._format_conversation_history(self.current_history)
+                status_info = self._get_connection_status_info()
+
+                prompt = f"""
+                Generate a comprehensive response to the user's query based on the conversation history and the results of MCP actions.
+
+                User Query: {state.query}
+
+                Conversation History:
+                {conversation_context}
+
+                MCP Interaction Results:
+                {formatted_results}
+
+                Agent Thought Process:
+                {self._format_thoughts(state.thoughts)}
+
+                System Status:
+                {status_info}
+
+                Instructions:
+                1. Synthesize information from successful MCP actions.
+                2. Explain any errors encountered and whether they were resolved.
+                3. If database queries were run, present the data clearly.
+                4. Address all parts of the original user query.
+                5. Use a helpful and informative tone. Do not just dump raw JSON or technical details.
+                6. Provide a clear conclusion or answer to the user's query.
+                7. If the system status indicates missing connections, briefly mention this at the end of your response.
+                """
+
+            # Stream from LLM
+            full_response = ""
+            async for chunk in self.llm.generate_streaming(prompt):
+                full_response += chunk
+                yield {
+                    "type": "response_chunk",
+                    "content": chunk,
+                    "partial_response": full_response,
+                }
+
+            # Append status information if necessary
+            if not self._db_connected:
+                status_note = "\n\n*Note: I'm currently running in stateless mode without access to conversation history storage.*"
+                full_response += status_note
+                yield {
+                    "type": "response_chunk",
+                    "content": status_note,
+                    "partial_response": full_response,
+                }
+
+            # Save final response to database
+            assistant_message = Message(role="assistant", content=full_response)
+            await self._save_message(state.session_id, assistant_message)
+
+            # Signal completion
+            yield {"type": "response_complete", "full_response": full_response}
+
+        except Exception as e:
+            logger.error(f"Error during streaming response generation: {e}", exc_info=True)
+            error_response = (
+                "I encountered an error while generating the response. Please try again."
+            )
+
+            # Try to save error to history
+            try:
+                error_message = Message(role="assistant", content=f"Error: {str(e)}")
+                await self._save_message(state.session_id, error_message)
+            except:
+                pass  # Don't let history saving errors prevent error reporting
+
+            yield {"type": "error", "error": str(e), "response": error_response}
+
+    # --- Core Workflow Methods (unchanged from original) ---
 
     async def _initialize_context(self, state: AgentState) -> AgentState:
         """Initialize context by discovering available tools and resources."""
@@ -365,7 +597,6 @@ class Agent:
             return state
 
         # Get the MCP client
-        # if server_id not in self.mcp_clients:
         if not self.transport_manager.get_client(server_id):
             error_msg = f"MCP client for '{server_id}' not available"
             state.mcp_results[action_key] = {"error": error_msg}

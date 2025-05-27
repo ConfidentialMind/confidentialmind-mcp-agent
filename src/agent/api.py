@@ -9,6 +9,7 @@ import uvicorn
 from confidentialmind_core.config_manager import load_environment
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from src.agent.agent import Agent
@@ -63,6 +64,21 @@ class ChatCompletionResponse(BaseModel):
     model: str = Field(..., description="Model used for completion")
     choices: List[ChatCompletionChoice]
     usage: ChatCompletionUsage
+
+
+# Streaming response models
+class ChatCompletionStreamChoice(BaseModel):
+    index: int = 0
+    delta: Dict[str, str] = Field(default_factory=dict)
+    finish_reason: Optional[Literal["stop", "length", "function_call"]] = None
+
+
+class ChatCompletionStreamChunk(BaseModel):
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: List[ChatCompletionStreamChoice]
 
 
 class AgentComponents:
@@ -281,34 +297,109 @@ def get_session_id(request: Request) -> str:
     return session_id
 
 
-@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-async def create_chat_completion(
-    request: Request,
-    req: ChatCompletionRequest,
-    components: AgentComponents = Depends(get_components),
+async def _stream_chat_completion(
+    query: str, session_id: str, req: ChatCompletionRequest, components: AgentComponents
 ):
-    """OpenAI-compatible chat completion endpoint."""
-    if req.stream:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Streaming is not supported yet",
+    """Generate streaming chat completion response"""
+
+    completion_id = f"chatcmpl-{uuid.uuid4()}"
+    created_timestamp = int(datetime.now().timestamp())
+
+    try:
+        # Create agent
+        agent = Agent(
+            components.database,
+            components.llm_connector,
+            components.transport_manager,
+            debug=False,
         )
 
-    # Get or create session ID
-    session_id = get_session_id(request)
+        await agent.initialize()
 
-    # Convert OpenAI messages to a single query
-    query = ""
-    for msg in req.messages:
-        if msg.role == "user":
-            query = msg.content
-            break  # Just use the last user message as the query
+        async with agent:
+            # Send initial chunk to establish the stream
+            initial_chunk = ChatCompletionStreamChunk(
+                id=completion_id,
+                created=created_timestamp,
+                model=req.model,
+                choices=[
+                    ChatCompletionStreamChoice(delta={"role": "assistant"}, finish_reason=None)
+                ],
+            )
+            yield f"data: {initial_chunk.model_dump_json()}\n\n"
 
-    if not query:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No user message provided",
+            # Stream agent execution
+            async for chunk_data in agent.run_streaming(query, session_id):
+                if chunk_data["type"] == "workflow_status":
+                    # Optionally send workflow status as metadata (commented out to reduce noise)
+                    # This could be enabled via a request parameter if desired
+                    pass
+
+                elif chunk_data["type"] == "response_chunk":
+                    # Send content chunk
+                    content_chunk = ChatCompletionStreamChunk(
+                        id=completion_id,
+                        created=created_timestamp,
+                        model=req.model,
+                        choices=[
+                            ChatCompletionStreamChoice(
+                                delta={"content": chunk_data["content"]}, finish_reason=None
+                            )
+                        ],
+                    )
+                    yield f"data: {content_chunk.model_dump_json()}\n\n"
+
+                elif chunk_data["type"] == "response_complete":
+                    # Send final chunk
+                    final_chunk = ChatCompletionStreamChunk(
+                        id=completion_id,
+                        created=created_timestamp,
+                        model=req.model,
+                        choices=[ChatCompletionStreamChoice(delta={}, finish_reason="stop")],
+                    )
+                    yield f"data: {final_chunk.model_dump_json()}\n\n"
+                    break
+
+                elif chunk_data["type"] == "error":
+                    # Send error as content and then finish
+                    error_chunk = ChatCompletionStreamChunk(
+                        id=completion_id,
+                        created=created_timestamp,
+                        model=req.model,
+                        choices=[
+                            ChatCompletionStreamChoice(
+                                delta={"content": f"\n\nError: {chunk_data['error']}"},
+                                finish_reason="stop",
+                            )
+                        ],
+                    )
+                    yield f"data: {error_chunk.model_dump_json()}\n\n"
+                    break
+
+    except Exception as e:
+        logger.error(f"Error in streaming completion: {e}", exc_info=True)
+        # Send error as final chunk
+        error_chunk = ChatCompletionStreamChunk(
+            id=completion_id,
+            created=created_timestamp,
+            model=req.model,
+            choices=[
+                ChatCompletionStreamChoice(
+                    delta={"content": f"\n\nError: {str(e)}"}, finish_reason="stop"
+                )
+            ],
         )
+        yield f"data: {error_chunk.model_dump_json()}\n\n"
+
+    finally:
+        # Send termination signal
+        yield "data: [DONE]\n\n"
+
+
+async def _create_non_streaming_completion(
+    query: str, session_id: str, req: ChatCompletionRequest, components: AgentComponents
+) -> ChatCompletionResponse:
+    """Create non-streaming completion response (original logic)"""
 
     try:
         # Create agent
@@ -357,6 +448,45 @@ async def create_chat_completion(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing request: {str(e)}",
         )
+
+
+@app.post("/v1/chat/completions")
+async def create_chat_completion(
+    request: Request,
+    req: ChatCompletionRequest,
+    components: AgentComponents = Depends(get_components),
+):
+    """OpenAI-compatible chat completion endpoint with streaming support."""
+
+    # Get or create session ID
+    session_id = get_session_id(request)
+
+    # Convert OpenAI messages to a single query
+    query = ""
+    for msg in req.messages:
+        if msg.role == "user":
+            query = msg.content
+            break
+
+    if not query:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No user message provided",
+        )
+
+    # Handle streaming vs non-streaming
+    if req.stream:
+        return StreamingResponse(
+            _stream_chat_completion(query, session_id, req, components),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Content-Type": "text/event-stream",
+            },
+        )
+    else:
+        return await _create_non_streaming_completion(query, session_id, req, components)
 
 
 @app.get("/health")

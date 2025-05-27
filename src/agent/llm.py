@@ -1,7 +1,8 @@
 import asyncio
+import json
 import logging
 import os
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 import aiohttp
 from confidentialmind_core.config_manager import load_environment
@@ -72,7 +73,7 @@ class LLMConnector:
                         logger.debug(f"LLMConnector: Poll {retry_count}: No URL available")
 
                 if current_base_url and current_base_url != self._last_base_url:
-                    logger.info(f"LLMConnector: Found new LLM URL, updating connection")
+                    logger.info("LLMConnector: Found new LLM URL, updating connection")
                     self._last_base_url = current_base_url
                     self._last_headers = headers or {}
 
@@ -191,12 +192,113 @@ class LLMConnector:
             self._is_connected = False  # Mark as disconnected on error
             return "I'm currently unable to generate a response due to a technical issue with my language model service. Please try again later."
 
+    async def generate_streaming(
+        self, prompt: str, system_prompt: Optional[str] = None
+    ) -> AsyncGenerator[str, None]:
+        """
+        Generate streaming text from the LLM.
+
+        Args:
+            prompt: The user prompt
+            system_prompt: Optional system prompt
+
+        Yields:
+            String chunks of the generated response
+        """
+        if not self.is_connected():
+            yield "I'm currently unable to generate a response as my language model connection is unavailable. Please try again later or contact support."
+            return
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 1000,
+            "model": "cm-llm",
+            "stream": True,  # Enable streaming
+        }
+
+        url = f"{self._last_base_url}/v1/chat/completions"
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=120, connect=30)  # Longer timeout for streaming
+            async with self._session.post(url, json=payload, timeout=timeout) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(
+                        f"LLMConnector: Streaming request failed: {response.status} - {error_text}"
+                    )
+                    yield "I encountered an error while processing your request. My language model service is experiencing issues."
+                    return
+
+                # Parse Server-Sent Events (SSE) stream
+                buffer = ""
+                async for chunk in response.content.iter_chunked(1024):
+                    try:
+                        # Decode chunk and add to buffer
+                        chunk_str = chunk.decode("utf-8")
+                        buffer += chunk_str
+
+                        # Process complete lines
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.strip()
+
+                            # Skip empty lines and non-data lines
+                            if not line or not line.startswith("data: "):
+                                continue
+
+                            # Extract data payload
+                            data_str = line[6:]  # Remove 'data: ' prefix
+
+                            # Check for stream termination
+                            if data_str == "[DONE]":
+                                return
+
+                            # Parse JSON chunk
+                            try:
+                                chunk_data = json.loads(data_str)
+
+                                # Extract content from the delta
+                                choices = chunk_data.get("choices", [])
+                                if choices:
+                                    delta = choices[0].get("delta", {})
+                                    content = delta.get("content", "")
+                                    if content:
+                                        yield content
+
+                            except json.JSONDecodeError:
+                                # Skip malformed JSON chunks
+                                logger.debug(
+                                    f"LLMConnector: Skipping malformed JSON chunk: {data_str}"
+                                )
+                                continue
+
+                    except UnicodeDecodeError:
+                        # Skip chunks that can't be decoded
+                        logger.debug("LLMConnector: Skipping chunk with decode error")
+                        continue
+
+        except asyncio.TimeoutError:
+            logger.error("LLMConnector: Streaming request timed out")
+            yield "\n\nI encountered a timeout while generating the response. Please try again with a shorter query."
+
+        except Exception as e:
+            logger.error(f"LLMConnector: Error during streaming generation: {e}")
+            self._is_connected = False  # Mark as disconnected on error
+            yield "I'm currently unable to generate a response due to a technical issue with my language model service. Please try again later."
+
     async def close(self):
         """Close the connector and release resources"""
         if self._session:
             logger.info("LLMConnector: Closing session")
             await self._session.close()
             self._session = None
+            self._is_connected = False
             logger.info("LLMConnector: Session closed")
 
         # Cancel background polling task
