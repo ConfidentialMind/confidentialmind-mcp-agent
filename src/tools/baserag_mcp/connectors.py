@@ -65,7 +65,7 @@ class BaseRAGConnectorManager:
                 connectors = [
                     # BaseRAG API connector
                     ConnectorSchema(
-                        type="api",
+                        type="endpoint",
                         label="BaseRAG API",
                         config_id=self.connector_id,
                     ),

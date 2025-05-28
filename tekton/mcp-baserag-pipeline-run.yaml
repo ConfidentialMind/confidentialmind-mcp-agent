@@ -32,7 +32,7 @@ spec:
     - name: image-reference
       value: mcp-baserag:0.1.0
     - name: service-name
-      value: mcp-postgres
+      value: mcp-baserag
     - name: values_file
       value: values.yaml
     - name: release-namespace
@@ -42,13 +42,13 @@ spec:
     - name: git-repo
       value: git@github.com:ConfidentialMind/confidentialmind-mcp-agent.git
     - name: branch
-      value: rag-mcp
+      value: dev
     - name: stack-branch
       value: dev
     - name: skip-deploy
       value: "true"
     - name: dockerfile
-      value: ./docker/postgres-mcp.Dockerfile
+      value: ./docker/baserag-mcp.Dockerfile
     - name: build-args
       value:
         - --insecure

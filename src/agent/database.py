@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -351,12 +352,19 @@ class Database:
 
     # Session history methods
 
-    async def load_history(self, session_id: str) -> List[Message]:
+    async def load_history(self, session_id: str, conversation_id: str = None) -> List[Message]:
         """
-        Load conversation history from the database for a session.
+        Load conversation history from the database for a session or conversation.
 
         If the database is not connected, returns an empty list,
         allowing the agent to operate in stateless mode.
+
+        Args:
+            session_id: Session identifier
+            conversation_id: Optional conversation identifier (takes precedence if provided)
+
+        Returns:
+            List of messages in the conversation
         """
         if not self.is_connected():
             logger.warning("Database: Not connected. Running in stateless mode.")
@@ -364,20 +372,39 @@ class Database:
 
         try:
             await self.ensure_connected()
-            results = await self.execute_query(
-                """
-                SELECT role, content
-                FROM conversation_messages
-                WHERE session_id = $1
-                ORDER BY message_order
-                """,
-                session_id,
-            )
+
+            if conversation_id:
+                # Use conversation-based lookup
+                results = await self.execute_query(
+                    """
+                    SELECT role, content
+                    FROM conversation_messages
+                    WHERE conversation_id = $1
+                    ORDER BY chain_position
+                    """,
+                    conversation_id,
+                )
+                logger.debug(
+                    f"Database: Loaded {len(results)} messages for conversation {conversation_id}"
+                )
+            else:
+                # Use session-based lookup (existing behavior)
+                results = await self.execute_query(
+                    """
+                    SELECT role, content
+                    FROM conversation_messages
+                    WHERE session_id = $1
+                    ORDER BY message_order
+                    """,
+                    session_id,
+                )
+                logger.debug(f"Database: Loaded {len(results)} messages for session {session_id}")
+
             messages = [Message(role=row["role"], content=row["content"]) for row in results]
-            logger.debug(f"Database: Loaded {len(messages)} messages for session {session_id}")
             return messages
         except Exception as e:
-            logger.error(f"Database: Error loading history for session {session_id}: {e}")
+            identifier = conversation_id if conversation_id else session_id
+            logger.error(f"Database: Error loading history for {identifier}: {e}")
             return []  # Return empty history on error
 
     async def save_message(self, session_id: str, message: Message) -> bool:
@@ -444,6 +471,294 @@ class Database:
             logger.error(f"Database: Error clearing history for session {session_id}: {e}")
             return False
 
+    # Conversation-based methods for stateless mode
+
+    async def load_conversation_by_id(self, conversation_id: str) -> List[Message]:
+        """
+        Load conversation history by conversation ID.
+
+        Args:
+            conversation_id: The conversation identifier
+
+        Returns:
+            List of messages in the conversation
+        """
+        if not self.is_connected():
+            logger.warning("Database: Not connected. Cannot load conversation.")
+            return []
+
+        try:
+            await self.ensure_connected()
+            results = await self.execute_query(
+                """
+                SELECT role, content
+                FROM conversation_messages
+                WHERE conversation_id = $1
+                ORDER BY chain_position
+                """,
+                conversation_id,
+            )
+            messages = [Message(role=row["role"], content=row["content"]) for row in results]
+            logger.debug(
+                f"Database: Loaded {len(messages)} messages for conversation {conversation_id}"
+            )
+            return messages
+        except Exception as e:
+            logger.error(f"Database: Error loading conversation {conversation_id}: {e}")
+            return []
+
+    async def create_conversation_chain(self, conversation_id: str, metadata: dict = None) -> bool:
+        """
+        Create a new conversation chain entry.
+
+        Args:
+            conversation_id: Unique conversation identifier
+            metadata: Optional metadata for the conversation
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_connected():
+            logger.warning("Database: Not connected. Cannot create conversation chain.")
+            return False
+
+        try:
+            await self.ensure_connected()
+            await self.execute_query(
+                """
+                INSERT INTO conversation_chains (conversation_id, conversation_metadata)
+                VALUES ($1, $2)
+                ON CONFLICT (conversation_id) DO UPDATE
+                SET last_updated = NOW()
+                """,
+                conversation_id,
+                json.dumps(metadata or {}),
+                fetch_type="none",
+            )
+            logger.debug(f"Database: Created conversation chain {conversation_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Database: Error creating conversation chain {conversation_id}: {e}")
+            return False
+
+    async def append_messages_to_conversation(
+        self, conversation_id: str, messages: List[Message], hashes: List[str]
+    ) -> bool:
+        """
+        Append messages to a conversation with their hash chain.
+
+        Args:
+            conversation_id: Conversation identifier
+            messages: List of messages to append
+            hashes: Corresponding message hashes
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_connected():
+            logger.warning("Database: Not connected. Cannot append messages.")
+            return False
+
+        if len(messages) != len(hashes):
+            logger.error("Database: Messages and hashes lists must have same length")
+            return False
+
+        try:
+            await self.ensure_connected()
+
+            # Get current chain position and message order
+            max_position = await self.execute_query(
+                "SELECT MAX(chain_position) FROM conversation_messages WHERE conversation_id = $1",
+                conversation_id,
+                fetch_type="val",
+            )
+            start_position = 0 if max_position is None else max_position + 1
+            
+            # Get max message order for session (using conversation_id as session_id)
+            max_order = await self.execute_query(
+                "SELECT MAX(message_order) FROM conversation_messages WHERE session_id = $1",
+                conversation_id,
+                fetch_type="val",
+            )
+            start_order = 0 if max_order is None else max_order + 1
+
+            # Insert messages
+            for i, (message, hash_value) in enumerate(zip(messages, hashes)):
+                parent_hash = (
+                    hashes[i - 1]
+                    if i > 0
+                    else (
+                        await self.execute_query(
+                            """
+                        SELECT message_hash 
+                        FROM conversation_messages 
+                        WHERE conversation_id = $1 
+                        ORDER BY chain_position DESC 
+                        LIMIT 1
+                        """,
+                            conversation_id,
+                            fetch_type="val",
+                        )
+                        or ""
+                    )
+                )
+
+                await self.execute_query(
+                    """
+                    INSERT INTO conversation_messages 
+                    (session_id, message_order, conversation_id, chain_position, role, content, message_hash, parent_hash, timestamp)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                    """,
+                    conversation_id,  # Use conversation_id as session_id for backward compatibility
+                    start_order + i,
+                    conversation_id,
+                    start_position + i,
+                    message.role,
+                    message.content,
+                    hash_value,
+                    parent_hash,
+                    fetch_type="none",
+                )
+
+            # Update conversation chain metadata
+            await self.execute_query(
+                """
+                UPDATE conversation_chains 
+                SET message_count = message_count + $1, last_updated = NOW()
+                WHERE conversation_id = $2
+                """,
+                len(messages),
+                conversation_id,
+                fetch_type="none",
+            )
+
+            logger.debug(
+                f"Database: Appended {len(messages)} messages to conversation {conversation_id}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                f"Database: Error appending messages to conversation {conversation_id}: {e}"
+            )
+            return False
+
+    async def find_conversation_by_hash_chain(self, hash_chain: List[str]) -> Optional[str]:
+        """
+        Find a conversation that matches the given hash chain.
+
+        Args:
+            hash_chain: List of message hashes to match
+
+        Returns:
+            Conversation ID if found, None otherwise
+        """
+        if not self.is_connected() or not hash_chain:
+            return None
+
+        try:
+            await self.ensure_connected()
+
+            # Find conversations that contain the first hash
+            result = await self.execute_query(
+                """
+                SELECT DISTINCT conversation_id 
+                FROM conversation_messages 
+                WHERE message_hash = $1
+                """,
+                hash_chain[0],
+                fetch_type="all",
+            )
+
+            if not result:
+                return None
+
+            # Check each candidate conversation for matching chain
+            for row in result:
+                conv_id = row["conversation_id"]
+
+                # Get the hash chain for this conversation
+                stored_hashes = await self.execute_query(
+                    """
+                    SELECT message_hash 
+                    FROM conversation_messages 
+                    WHERE conversation_id = $1 
+                    ORDER BY chain_position
+                    """,
+                    conv_id,
+                    fetch_type="all",
+                )
+
+                stored_chain = [r["message_hash"] for r in stored_hashes]
+
+                # Check if the incoming chain matches the beginning of stored chain
+                if len(stored_chain) >= len(hash_chain):
+                    if all(h1 == h2 for h1, h2 in zip(hash_chain, stored_chain[: len(hash_chain)])):
+                        logger.debug(f"Database: Found matching conversation {conv_id}")
+                        return conv_id
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Database: Error finding conversation by hash chain: {e}")
+            return None
+
+    async def get_conversation_metadata(self, conversation_id: str) -> Optional[dict]:
+        """
+        Get metadata for a conversation.
+
+        Args:
+            conversation_id: Conversation identifier
+
+        Returns:
+            Metadata dict or None if not found
+        """
+        if not self.is_connected():
+            return None
+
+        try:
+            await self.ensure_connected()
+            result = await self.execute_query(
+                "SELECT conversation_metadata FROM conversation_chains WHERE conversation_id = $1",
+                conversation_id,
+                fetch_type="val",
+            )
+            return json.loads(result) if result else None
+        except Exception as e:
+            logger.error(f"Database: Error getting conversation metadata: {e}")
+            return None
+
+    async def update_conversation_metadata(self, conversation_id: str, metadata: dict) -> bool:
+        """
+        Update metadata for a conversation.
+
+        Args:
+            conversation_id: Conversation identifier
+            metadata: New metadata dict
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_connected():
+            return False
+
+        try:
+            await self.ensure_connected()
+            await self.execute_query(
+                """
+                UPDATE conversation_chains 
+                SET conversation_metadata = $1, last_updated = NOW()
+                WHERE conversation_id = $2
+                """,
+                json.dumps(metadata),
+                conversation_id,
+                fetch_type="none",
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Database: Error updating conversation metadata: {e}")
+            return False
+
     async def ensure_schema(self) -> bool:
         """
         Ensure necessary database tables exist
@@ -473,7 +788,11 @@ class Database:
                         message_order INTEGER NOT NULL,
                         role TEXT NOT NULL,
                         content TEXT NOT NULL,
-                        timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        conversation_id VARCHAR,
+                        message_hash VARCHAR,
+                        chain_position INTEGER,
+                        parent_hash VARCHAR
                     );
                     
                     CREATE INDEX IF NOT EXISTS idx_conversation_messages_session_id 
@@ -481,10 +800,31 @@ class Database:
                     
                     CREATE INDEX IF NOT EXISTS idx_conversation_messages_order 
                     ON conversation_messages(session_id, message_order);
+                    
+                    CREATE INDEX IF NOT EXISTS idx_conversation_messages_conv_chain
+                    ON conversation_messages(conversation_id, chain_position);
+                    
+                    CREATE INDEX IF NOT EXISTS idx_conversation_messages_hash
+                    ON conversation_messages(message_hash);
                     """,
                     fetch_type="none",
                 )
                 logger.info("Database: Created conversation_messages table and indices")
+
+                # Create conversation_chains table
+                await self.execute_query(
+                    """
+                    CREATE TABLE IF NOT EXISTS conversation_chains (
+                        conversation_id VARCHAR PRIMARY KEY,
+                        message_count INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        last_updated TIMESTAMP DEFAULT NOW(),
+                        conversation_metadata JSONB DEFAULT '{}'
+                    );
+                    """,
+                    fetch_type="none",
+                )
+                logger.info("Database: Created conversation_chains table")
                 return True
             else:  # validate table structure
                 expected_columns = {
@@ -494,6 +834,10 @@ class Database:
                     "role": {"data_type": "text", "is_nullable": "NO"},
                     "content": {"data_type": "text", "is_nullable": "NO"},
                     "timestamp": {"data_type": "timestamp with time zone", "is_nullable": "NO"},
+                    "conversation_id": {"data_type": "character varying", "is_nullable": "YES"},
+                    "message_hash": {"data_type": "character varying", "is_nullable": "YES"},
+                    "chain_position": {"data_type": "integer", "is_nullable": "YES"},
+                    "parent_hash": {"data_type": "character varying", "is_nullable": "YES"},
                 }
 
                 # Get actual columns
@@ -514,13 +858,35 @@ class Database:
                     for col in columns
                 }
 
-                # Check for missing columns
+                # Check for missing columns and add them if needed
                 missing_columns = set(expected_columns.keys()) - set(actual_columns.keys())
                 if missing_columns:
-                    logger.error(
-                        f"Database: Missing columns in conversation_messages table: {missing_columns}"
+                    logger.info(
+                        f"Database: Adding missing columns to conversation_messages table: {missing_columns}"
                     )
-                    return False
+                    # Add missing columns
+                    for col in missing_columns:
+                        if col == "conversation_id":
+                            await self.execute_query(
+                                "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS conversation_id VARCHAR",
+                                fetch_type="none",
+                            )
+                        elif col == "message_hash":
+                            await self.execute_query(
+                                "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS message_hash VARCHAR",
+                                fetch_type="none",
+                            )
+                        elif col == "chain_position":
+                            await self.execute_query(
+                                "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS chain_position INTEGER",
+                                fetch_type="none",
+                            )
+                        elif col == "parent_hash":
+                            await self.execute_query(
+                                "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS parent_hash VARCHAR",
+                                fetch_type="none",
+                            )
+                    logger.info("Database: Added missing columns successfully")
 
                 # Check for columns with wrong type or nullability
                 for col_name, expected_props in expected_columns.items():
@@ -539,6 +905,8 @@ class Database:
                 expected_indices = [
                     "idx_conversation_messages_session_id",
                     "idx_conversation_messages_order",
+                    "idx_conversation_messages_conv_chain",
+                    "idx_conversation_messages_hash",
                 ]
 
                 indices = await self.execute_query(
@@ -572,9 +940,47 @@ class Database:
                                 """,
                                 fetch_type="none",
                             )
+                        elif idx == "idx_conversation_messages_conv_chain":
+                            await self.execute_query(
+                                """
+                                CREATE INDEX IF NOT EXISTS idx_conversation_messages_conv_chain
+                                ON conversation_messages(conversation_id, chain_position)
+                                """,
+                                fetch_type="none",
+                            )
+                        elif idx == "idx_conversation_messages_hash":
+                            await self.execute_query(
+                                """
+                                CREATE INDEX IF NOT EXISTS idx_conversation_messages_hash
+                                ON conversation_messages(message_hash)
+                                """,
+                                fetch_type="none",
+                            )
                     logger.info(f"Database: Created missing indices: {missing_indices}")
 
                 logger.info("Database: Validated conversation_messages table structure")
+
+                # Ensure conversation_chains table exists
+                chains_table_exists = await self.execute_query(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'conversation_chains')",
+                    fetch_type="val",
+                )
+
+                if not chains_table_exists:
+                    await self.execute_query(
+                        """
+                        CREATE TABLE IF NOT EXISTS conversation_chains (
+                            conversation_id VARCHAR PRIMARY KEY,
+                            message_count INTEGER DEFAULT 0,
+                            created_at TIMESTAMP DEFAULT NOW(),
+                            last_updated TIMESTAMP DEFAULT NOW(),
+                            conversation_metadata JSONB DEFAULT '{}'
+                        );
+                        """,
+                        fetch_type="none",
+                    )
+                    logger.info("Database: Created conversation_chains table")
+
                 return True
 
         except Exception as e:

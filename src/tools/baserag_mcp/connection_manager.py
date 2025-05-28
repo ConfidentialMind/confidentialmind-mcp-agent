@@ -153,8 +153,8 @@ class ConnectionManager:
             # If no headers are available, use default settings
             if not cls._current_headers:
                 cls._current_headers = {}
-                if settings.api_key:
-                    cls._current_headers["Authorization"] = f"Bearer {settings.api_key}"
+            if settings.api_key:
+                cls._current_headers["Authorization"] = f"Bearer {settings.api_key}"
 
             # Create the session
             logger.info(
