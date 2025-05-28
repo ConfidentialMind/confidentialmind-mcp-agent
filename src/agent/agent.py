@@ -175,8 +175,15 @@ class Agent:
         definite_session_id = session_id or str(uuid.uuid4())
         logger.info(f"Session ID: {definite_session_id}")
 
+        # Check if this is a conversation ID (starts with "conv_")
+        conversation_id = None
+        if definite_session_id.startswith("conv_"):
+            conversation_id = definite_session_id
+            # Use conversation_id as session_id for compatibility
+            logger.info(f"Using conversation mode with ID: {conversation_id}")
+
         # Load history if database is connected
-        await self._load_history(definite_session_id)
+        await self._load_history(definite_session_id, conversation_id)
 
         # Handle management commands
         if query.strip().lower() == "clear history":
@@ -975,10 +982,10 @@ class Agent:
                     formatted += f"   Result: Error - {result_data['error']}\n"
                 elif result_data:
                     formatted += (
-                        f"   Result: Success (details omitted)\n"  # Avoid dumping large raw results
+                        "   Result: Success (details omitted)\n"  # Avoid dumping large raw results
                     )
                 else:
-                    formatted += f"   Result: Not found\n"
+                    formatted += "   Result: Not found\n"
 
         return formatted.strip()
 
@@ -1074,18 +1081,28 @@ class Agent:
 
     # --- Database helpers ---
 
-    async def _load_history(self, session_id: str) -> List[Message]:
-        """Load conversation history from the database."""
+    async def _load_history(self, session_id: str, conversation_id: str = None) -> List[Message]:
+        """
+        Load conversation history from the database.
+
+        Args:
+            session_id: Session identifier
+            conversation_id: Optional conversation identifier (takes precedence if provided)
+
+        Returns:
+            List of messages in the conversation
+        """
         if not self._db_connected:
             logger.warning("Database not connected. Running in stateless mode.")
             return []
 
         try:
-            history = await self.db.load_history(session_id)
+            history = await self.db.load_history(session_id, conversation_id)
             self.current_history = history
             return history
         except Exception as e:
-            logger.error(f"Failed to load history for session {session_id}: {e}")
+            identifier = conversation_id if conversation_id else session_id
+            logger.error(f"Failed to load history for {identifier}: {e}")
             return []  # Return empty history on error
 
     async def _save_message(self, session_id: str, message: Message) -> bool:
@@ -1133,8 +1150,15 @@ class Agent:
         definite_session_id = session_id or str(uuid.uuid4())
         logger.info(f"Session ID: {definite_session_id}")
 
+        # Check if this is a conversation ID (starts with "conv_")
+        conversation_id = None
+        if definite_session_id.startswith("conv_"):
+            conversation_id = definite_session_id
+            # Use conversation_id as session_id for compatibility
+            logger.info(f"Using conversation mode with ID: {conversation_id}")
+
         # Load history if database is connected
-        await self._load_history(definite_session_id)
+        await self._load_history(definite_session_id, conversation_id)
 
         # Handle management commands
         if query.strip().lower() == "clear history":
