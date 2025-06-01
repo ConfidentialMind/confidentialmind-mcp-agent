@@ -54,6 +54,13 @@ class ConnectionManager:
             f"ConnectionManager: Initializing in {'stack' if cls._is_stack_deployment else 'local'} mode"
         )
 
+        # Check if we have an explicit DSN
+        if settings.dsn:
+            logger.info("ConnectionManager: Using explicit DSN from PG_DSN environment variable")
+            cls._initialized = True
+            # No need for connector manager or background polling with explicit DSN
+            return True
+
         # Initialize the connector manager
         cls._connector_manager = PostgresConnectorManager(settings.connector_id)
         try:
@@ -155,19 +162,25 @@ class ConnectionManager:
         cls._is_connecting = True
         try:
             # In stack deployment mode without URL, return None but don't raise
-            if cls._is_stack_deployment and not cls._current_url:
+            if settings.dsn:
                 logger.info(
-                    "ConnectionManager: No database URL available yet in stack deployment mode"
+                    "ConnectionManager: Using explicit DSN from PG_DSN environment variable"
                 )
-                cls._connection_error = "No database URL available yet"
-                cls._is_connecting = False
-                return None
+                connection_string = settings.get_connection_string()
+            else:
+                if cls._is_stack_deployment and not cls._current_url:
+                    logger.info(
+                        "ConnectionManager: No database URL available yet in stack deployment mode"
+                    )
+                    cls._connection_error = "No database URL available yet"
+                    cls._is_connecting = False
+                    return None
 
-            # Get connection string using the URL
-            connection_string = settings.get_connection_string(cls._current_url)
-            logger.info(
-                f"ConnectionManager: Creating database connection pool with URL: {cls._current_url}"
-            )
+                # Get connection string using the URL
+                connection_string = settings.get_connection_string(cls._current_url)
+                logger.info(
+                    f"ConnectionManager: Creating database connection pool with URL: {cls._current_url}"
+                )
 
             # Create the pool
             cls._pool = await asyncpg.create_pool(
