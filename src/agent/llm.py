@@ -8,6 +8,7 @@ import aiohttp
 from confidentialmind_core.config_manager import load_environment
 
 from src.agent.connectors import ConnectorConfigManager
+from src.agent.logging_config import get_logger
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ class LLMConnector:
         self._session = None
         self._background_fetch_task = None
         self._is_connected = False
+
+        # Use structlog logger
+        self.logger = get_logger("agent.llm")
 
         # Determine if running in stack deployment mode
         load_environment()

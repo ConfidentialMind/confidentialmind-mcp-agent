@@ -13,12 +13,12 @@ RUN pip install --no-cache-dir \
   starlette>=0.27.0
 
 # Copy MCP protocol and server code
-COPY src/tools/baserag_mcp ./src/tools/baserag_mcp
+COPY src ./src
 
 # Create empty __init__.py files to ensure proper module imports
-RUN mkdir -p src/tools && \
-  touch src/tools/__init__.py && \
-  touch src/tools/baserag_mcp/__init__.py
+# RUN mkdir -p src/tools && \
+#   touch src/tools/__init__.py && \
+#   touch src/tools/baserag_mcp/__init__.py
 
 # Set environment variables
 ENV PYTHONPATH=/app
