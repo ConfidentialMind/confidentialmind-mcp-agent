@@ -791,7 +791,7 @@ class Agent:
                 "max_attempts": state.max_replan_attempts,
                 "last_error": state.execution_context.get("last_error"),
             },
-            level="WARNING" if state.replan_count > 1 else "INFO",
+            level="WARNING" if state.replan_count > 1 else "DEFAULT",
         )
         logger.info("Replanning actions due to execution issues...")
 

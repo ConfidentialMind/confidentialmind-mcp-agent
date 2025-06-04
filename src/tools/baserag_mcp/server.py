@@ -83,7 +83,7 @@ mcp_server = FastMCP(
 
 
 @mcp_server.resource("baserag://resources")
-async def get_baserag_resources(ctx: Context) -> Dict[str, Any]:
+async def get_baserag_resources(ctx: Context = None) -> Dict[str, Any]:
     """
     Retrieves information about the available BaseRAG resources.
     This resource provides metadata about the BaseRAG APIs exposed through this MCP server.
@@ -171,7 +171,7 @@ async def get_baserag_resources(ctx: Context) -> Dict[str, Any]:
 
 @mcp_server.tool()
 @observe()
-async def get_context(query: str, ctx: Context) -> Dict[str, Any]:
+async def get_context(query: str, ctx: Context = None) -> Dict[str, Any]:
     """
     Retrieve relevant context for a query from the knowledge base.
 
@@ -234,7 +234,7 @@ async def get_context(query: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp_server.tool()
 @observe()
-async def get_content(content_id: str, ctx: Context) -> Dict[str, Any]:
+async def get_content(content_id: str, ctx: Context = None) -> Dict[str, Any]:
     """
     Retrieve content by its ID from the knowledge base.
 
@@ -292,7 +292,7 @@ async def get_content(content_id: str, ctx: Context) -> Dict[str, Any]:
 
 @mcp_server.tool()
 @observe()
-async def get_content_chunks(content_id: str, ctx: Context) -> Dict[str, Any]:
+async def get_content_chunks(content_id: str, ctx: Context = None) -> Dict[str, Any]:
     """
     Retrieve the individual chunks of a content by its ID.
 
@@ -353,11 +353,11 @@ async def get_content_chunks(content_id: str, ctx: Context) -> Dict[str, Any]:
 @mcp_server.tool()
 @observe(as_type="generation")
 async def chat_completion(
-    ctx: Context,
     messages: List[Dict[str, Any]],
     model: Optional[str] = "cm-llm",
     temperature: Optional[float] = 0.7,
     stream: Optional[bool] = False,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """
     Generate a chat completion using BaseRAG's retrieval-augmented generation.
@@ -366,11 +366,11 @@ async def chat_completion(
     using the knowledge base for context.
 
     Args:
-        ctx: The MCP context (automatically injected).
         messages: List of message objects with 'role' and 'content' fields.
         model: The model to use for completion (default: "cm-llm").
         temperature: Controls randomness (0-1, default: 0.7).
         stream: Whether to stream the response (not currently supported, default: False).
+        ctx: The MCP context (automatically injected).
 
     Returns:
         A dictionary containing the completion response with model-generated content.
