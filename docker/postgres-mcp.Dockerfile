@@ -10,7 +10,8 @@ RUN pip install --no-cache-dir \
   pydantic-settings>=2.8.1 \
   backoff>=2.2.1 \
   confidentialmind-core==0.1.8 \
-  structlog>=25.3.0
+  structlog>=25.3.0 \
+  langfuse>=2.60.8
 
 # Copy MCP protocol and server code
 COPY src/tools/postgres_mcp ./src/tools/postgres_mcp

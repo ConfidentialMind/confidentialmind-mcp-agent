@@ -30,7 +30,7 @@ spec:
     - name: registry-host
       value: confidentialmind.azurecr.io/main/services
     - name: image-reference
-      value: mcp-baserag:0.1.0
+      value: mcp-baserag:0.1.1
     - name: service-name
       value: mcp-baserag
     - name: values_file
@@ -42,7 +42,7 @@ spec:
     - name: git-repo
       value: git@github.com:ConfidentialMind/confidentialmind-mcp-agent.git
     - name: branch
-      value: dev
+      value: langfuse
     - name: stack-branch
       value: dev
     - name: skip-deploy

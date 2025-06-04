@@ -10,7 +10,8 @@ RUN pip install --no-cache-dir \
   pydantic-settings>=2.8.1 \
   confidentialmind-core==0.1.8 \
   uvicorn>=0.34.0 \
-  starlette>=0.27.0
+  starlette>=0.27.0 \
+  langfuse>=2.60.8
 
 # Copy MCP protocol and server code
 COPY src/tools/baserag_mcp ./src/tools/baserag_mcp
