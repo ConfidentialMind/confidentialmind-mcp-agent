@@ -17,6 +17,13 @@ from src.agent.connectors import ConnectorConfigManager
 from src.agent.conversation_manager import ConversationManager
 from src.agent.database import Database, DatabaseSettings
 from src.agent.llm import LLMConnector
+from src.agent.observability import (
+    flush_traces,
+    initialize_langfuse,
+    observe,
+    update_trace_metadata,
+    update_observation_metadata,
+)
 from src.agent.state import Message
 from src.agent.transport import TransportManager
 
@@ -24,6 +31,9 @@ from src.agent.transport import TransportManager
 logger = logging.getLogger("fastmcp_agent.api")
 
 load_environment()
+
+# Initialize Langfuse observability
+initialize_langfuse()
 
 
 # Define Pydantic models for OpenAI API compatibility
@@ -303,10 +313,22 @@ def get_session_id(request: Request) -> str:
     return session_id
 
 
+@observe(capture_input=False, capture_output=False)
 async def _stream_chat_completion(
     query: str, session_id: str, req: ChatCompletionRequest, components: AgentComponents
 ):
     """Generate streaming chat completion response"""
+    # Update trace metadata
+    update_trace_metadata(
+        name="Stream Chat Completion",
+        session_id=session_id,
+        metadata={
+            "model": req.model,
+            "streaming": True,
+            "temperature": req.temperature,
+            "conversation_id": req.conversation_id,
+        },
+    )
 
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_timestamp = int(datetime.now().timestamp())
@@ -367,6 +389,14 @@ async def _stream_chat_completion(
                     break
 
                 elif chunk_data["type"] == "error":
+                    # Update trace with error
+                    update_trace_metadata(
+                        metadata={
+                            "error": chunk_data["error"],
+                            "error_type": "workflow_error",
+                        },
+                    )
+
                     # Send error as content and then finish
                     error_chunk = ChatCompletionStreamChunk(
                         id=completion_id,
@@ -384,6 +414,15 @@ async def _stream_chat_completion(
 
     except Exception as e:
         logger.error(f"Error in streaming completion: {e}", exc_info=True)
+
+        # Update trace with error
+        update_trace_metadata(
+            metadata={
+                "error": str(e),
+                "error_type": "streaming_error",
+            },
+        )
+
         # Send error as final chunk
         error_chunk = ChatCompletionStreamChunk(
             id=completion_id,
@@ -402,6 +441,7 @@ async def _stream_chat_completion(
         yield "data: [DONE]\n\n"
 
 
+@observe(capture_input=False, capture_output=False)
 async def _create_stateless_completion(
     query: str,
     conversation_id: str,
@@ -411,6 +451,17 @@ async def _create_stateless_completion(
     existing_hashes: List[str],
 ) -> ChatCompletionResponse:
     """Create non-streaming completion for stateless mode."""
+    # Update trace metadata
+    update_trace_metadata(
+        name="Stateless Chat Completion",
+        session_id=conversation_id,
+        metadata={
+            "model": req.model,
+            "streaming": False,
+            "temperature": req.temperature,
+            "stateless_mode": True,
+        },
+    )
 
     try:
         # Create agent
@@ -481,6 +532,7 @@ async def _create_stateless_completion(
         )
 
 
+@observe(capture_input=False, capture_output=False)
 async def _stream_stateless_completion(
     query: str,
     conversation_id: str,
@@ -490,6 +542,17 @@ async def _stream_stateless_completion(
     existing_hashes: List[str],
 ):
     """Generate streaming chat completion response for stateless mode."""
+    # Update trace metadata
+    update_trace_metadata(
+        name="Stream Stateless Chat Completion",
+        session_id=conversation_id,
+        metadata={
+            "model": req.model,
+            "streaming": True,
+            "temperature": req.temperature,
+            "stateless_mode": True,
+        },
+    )
 
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_timestamp = int(datetime.now().timestamp())
@@ -574,6 +637,14 @@ async def _stream_stateless_completion(
                     break
 
                 elif chunk_data["type"] == "error":
+                    # Update trace with error
+                    update_trace_metadata(
+                        metadata={
+                            "error": chunk_data["error"],
+                            "error_type": "workflow_error",
+                        },
+                    )
+
                     # Send error as content and then finish
                     error_chunk = ChatCompletionStreamChunk(
                         id=completion_id,
@@ -609,10 +680,21 @@ async def _stream_stateless_completion(
         yield "data: [DONE]\n\n"
 
 
+@observe(capture_input=False, capture_output=False)
 async def _create_non_streaming_completion(
     query: str, session_id: str, req: ChatCompletionRequest, components: AgentComponents
 ) -> ChatCompletionResponse:
     """Create non-streaming completion response (original logic)"""
+    # Update trace metadata
+    update_trace_metadata(
+        name="Chat Completion",
+        session_id=session_id,
+        metadata={
+            "model": req.model,
+            "streaming": False,
+            "temperature": req.temperature,
+        },
+    )
 
     try:
         # Create agent
@@ -821,12 +903,40 @@ async def _process_stateless_request(
 
 
 @app.post("/v1/chat/completions")
+@observe(capture_input=False)
 async def create_chat_completion(
     request: Request,
     req: ChatCompletionRequest,
     components: AgentComponents = Depends(get_components),
 ):
     """OpenAI-compatible chat completion endpoint with streaming support."""
+    # Extract user message for trace naming
+    user_message = next((msg.content for msg in req.messages if msg.role == "user"), "")
+    trace_name = f"Chat: {user_message[:50]}..." if user_message else "Chat Completion"
+
+    # Update trace metadata with serializable request info
+    update_trace_metadata(
+        name=trace_name,
+        user_id=req.user,
+        tags=["api", "chat-completion"],
+        metadata={
+            "model": req.model,
+            "message_count": len(req.messages),
+            "streaming": req.stream,
+        },
+    )
+    
+    # Log the actual request data in the observation
+    update_observation_metadata(
+        input={
+            "model": req.model,
+            "messages": [{"role": msg.role, "content": msg.content} for msg in req.messages],
+            "temperature": req.temperature,
+            "max_tokens": req.max_tokens,
+            "stream": req.stream,
+            "conversation_id": req.conversation_id,
+        }
+    )
 
     # Get session ID if provided
     session_id = get_session_id(request)
@@ -915,6 +1025,8 @@ async def shutdown_event():
     """Clean up resources on shutdown."""
     logger.info("Shutting down FastMCP Agent API server")
     await components.cleanup()
+    # Flush any pending traces
+    flush_traces()
 
 
 def start_api_server(host: str = "0.0.0.0", port: int = 8000, log_level: str = "info"):

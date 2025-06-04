@@ -6,6 +6,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from confidentialmind_core.config_manager import load_environment
 from fastmcp import Context, FastMCP
+from langfuse.decorators import langfuse_context, observe
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -169,6 +170,7 @@ async def get_baserag_resources(ctx: Context) -> Dict[str, Any]:
 
 
 @mcp_server.tool()
+@observe()
 async def get_context(query: str, ctx: Context) -> Dict[str, Any]:
     """
     Retrieve relevant context for a query from the knowledge base.
@@ -198,6 +200,12 @@ async def get_context(query: str, ctx: Context) -> Dict[str, Any]:
         ]
     }
     """
+    # Update observation metadata
+    langfuse_context.update_current_observation(
+        name="BaseRAG Get Context",
+        input={"query": query},
+        metadata={"tool": "baserag_mcp", "operation": "get_context"},
+    )
     if not ctx.request_context.lifespan_context.get("api_connected", False):
         logger.error("BaseRAG API not connected when retrieving context.")
         raise RuntimeError("BaseRAG API connection is not available yet. Please try again later.")
@@ -205,6 +213,13 @@ async def get_context(query: str, ctx: Context) -> Dict[str, Any]:
     try:
         result = await BaseRAGClient.get_context(query)
         await ctx.info(f"Retrieved context for query: {query}")
+
+        # Update observation with results
+        langfuse_context.update_current_observation(
+            output=result,
+            metadata={"contexts_count": len(result.get("contexts", []))},
+        )
+
         return result
     except APIConnectionError as e:
         logger.error(f"API connection error while retrieving context: {e}")
@@ -218,6 +233,7 @@ async def get_context(query: str, ctx: Context) -> Dict[str, Any]:
 
 
 @mcp_server.tool()
+@observe()
 async def get_content(content_id: str, ctx: Context) -> Dict[str, Any]:
     """
     Retrieve content by its ID from the knowledge base.
@@ -242,6 +258,12 @@ async def get_content(content_id: str, ctx: Context) -> Dict[str, Any]:
         }
     }
     """
+    # Update observation metadata
+    langfuse_context.update_current_observation(
+        name="BaseRAG Get Content",
+        input={"content_id": content_id},
+        metadata={"tool": "baserag_mcp", "operation": "get_content"},
+    )
     if not ctx.request_context.lifespan_context.get("api_connected", False):
         logger.error("BaseRAG API not connected when retrieving content.")
         raise RuntimeError("BaseRAG API connection is not available yet. Please try again later.")
@@ -249,6 +271,13 @@ async def get_content(content_id: str, ctx: Context) -> Dict[str, Any]:
     try:
         result = await BaseRAGClient.get_content(content_id)
         await ctx.info(f"Retrieved content with ID: {content_id}")
+
+        # Update observation with results
+        langfuse_context.update_current_observation(
+            output=result,
+            metadata={"content_length": len(result.get("text", ""))},
+        )
+
         return result
     except APIConnectionError as e:
         logger.error(f"API connection error while retrieving content: {e}")
@@ -262,6 +291,7 @@ async def get_content(content_id: str, ctx: Context) -> Dict[str, Any]:
 
 
 @mcp_server.tool()
+@observe()
 async def get_content_chunks(content_id: str, ctx: Context) -> Dict[str, Any]:
     """
     Retrieve the individual chunks of a content by its ID.
@@ -288,6 +318,12 @@ async def get_content_chunks(content_id: str, ctx: Context) -> Dict[str, Any]:
         ]
     }
     """
+    # Update observation metadata
+    langfuse_context.update_current_observation(
+        name="BaseRAG Get Content Chunks",
+        input={"content_id": content_id},
+        metadata={"tool": "baserag_mcp", "operation": "get_content_chunks"},
+    )
     if not ctx.request_context.lifespan_context.get("api_connected", False):
         logger.error("BaseRAG API not connected when retrieving content chunks.")
         raise RuntimeError("BaseRAG API connection is not available yet. Please try again later.")
@@ -295,6 +331,13 @@ async def get_content_chunks(content_id: str, ctx: Context) -> Dict[str, Any]:
     try:
         result = await BaseRAGClient.get_content_chunks(content_id)
         await ctx.info(f"Retrieved chunks for content with ID: {content_id}")
+
+        # Update observation with results
+        langfuse_context.update_current_observation(
+            output=result,
+            metadata={"chunks_count": len(result.get("chunks", []))},
+        )
+
         return result
     except APIConnectionError as e:
         logger.error(f"API connection error while retrieving content chunks: {e}")
@@ -308,6 +351,7 @@ async def get_content_chunks(content_id: str, ctx: Context) -> Dict[str, Any]:
 
 
 @mcp_server.tool()
+@observe(as_type="generation")
 async def chat_completion(
     ctx: Context,
     messages: List[Dict[str, Any]],
@@ -378,6 +422,19 @@ async def chat_completion(
         stream = False
 
     try:
+        # Update observation metadata
+        langfuse_context.update_current_observation(
+            name="BaseRAG Chat Completion",
+            input=messages,
+            model=model,
+            metadata={
+                "tool": "baserag_mcp",
+                "operation": "chat_completion",
+                "temperature": temperature,
+                "stream": stream,
+            },
+        )
+
         result = await BaseRAGClient.chat_completion(
             messages=messages, model=model, temperature=temperature
         )
@@ -391,6 +448,12 @@ async def chat_completion(
 
         await ctx.info(
             f"Generated completion for: '{user_message[:50]}...' → '{truncated_response}'"
+        )
+
+        # Update observation with output and usage
+        langfuse_context.update_current_observation(
+            output=response_content,
+            usage=result.get("usage"),
         )
 
         return result

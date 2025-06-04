@@ -13,6 +13,7 @@ from fastmcp.exceptions import ClientError
 from src.agent.connectors import ConnectorConfigManager
 from src.agent.database import Database
 from src.agent.llm import LLMConnector
+from src.agent.observability import observe, update_observation_metadata
 from src.agent.state import AgentState, Message
 from src.agent.transport import TransportManager
 
@@ -114,6 +115,7 @@ class Agent:
 
     # --- Streaming Support ---
 
+    @observe()
     async def run_streaming(
         self, query: str, session_id: Optional[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -123,6 +125,12 @@ class Agent:
         Yields:
             Dict containing workflow updates and final streaming response
         """
+        # Update observation metadata
+        update_observation_metadata(
+            name="Agent Streaming Run",
+            input={"query": query, "session_id": session_id},
+            metadata={"streaming": True},
+        )
         logger.info(f"Starting streaming agent run for query: '{query[:50]}...'")
 
         try:
@@ -161,10 +169,16 @@ class Agent:
                 "response": "I encountered an error processing your request. Please try again or contact support if the issue persists.",
             }
 
+    @observe()
     async def _execute_workflow_until_response(
         self, query: str, session_id: Optional[str] = None
     ) -> AgentState:
         """Execute workflow stages 1-5 (everything except response generation)"""
+        # Update observation metadata
+        update_observation_metadata(
+            name="Execute Workflow",
+            metadata={"stages": "1-5", "query_length": len(query)},
+        )
 
         # Update connection status
         self._db_connected = self.db.is_connected()
@@ -256,10 +270,19 @@ class Agent:
 
         return state
 
+    @observe()
     async def _generate_response_streaming(
         self, state: AgentState
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate streaming response using LLM streaming capabilities"""
+        # Update observation metadata
+        update_observation_metadata(
+            name="Generate Streaming Response",
+            metadata={
+                "simple_mode": state.execution_context.get("simple_mode", False),
+                "has_mcp_results": bool(state.mcp_results),
+            },
+        )
 
         logger.info("Starting streaming response generation")
 
@@ -353,8 +376,14 @@ class Agent:
 
     # --- Core Workflow Methods (unchanged from original) ---
 
+    @observe()
     async def _initialize_context(self, state: AgentState) -> AgentState:
         """Initialize context by discovering available tools and resources."""
+        # Update observation metadata
+        update_observation_metadata(
+            name="Initialize Context",
+            metadata={"session_id": state.session_id},
+        )
         logger.info("Initializing agent context...")
 
         # Update status flags
@@ -445,8 +474,18 @@ class Agent:
             logger.error(f"Error in initialize_context: {e}", exc_info=True)
             return state
 
+    @observe()
     async def _parse_query(self, state: AgentState) -> AgentState:
         """Use LLM to determine which MCPs and actions are needed."""
+        # Update observation metadata
+        update_observation_metadata(
+            name="Parse Query",
+            input=state.query,
+            metadata={
+                "available_tools": len(state.execution_context.get("available_tools", [])),
+                "available_servers": len(state.execution_context.get("server_ids", [])),
+            },
+        )
         logger.info("Parsing user query: %s", state.query)
 
         try:
@@ -583,8 +622,24 @@ class Agent:
             logger.error(f"Error in parse_query: {e}", exc_info=True)
             return state
 
+    @observe()
     async def _execute_mcp_actions(self, state: AgentState) -> AgentState:
         """Execute the next planned action using the appropriate MCP client."""
+        # Update observation metadata
+        current_action = (
+            state.planned_actions[state.current_action_index]
+            if state.current_action_index < len(state.planned_actions)
+            else None
+        )
+        update_observation_metadata(
+            name="Execute MCP Action",
+            metadata={
+                "action_index": state.current_action_index,
+                "total_actions": len(state.planned_actions),
+                "server_id": current_action.get("server_id") if current_action else None,
+                "mcp_method": current_action.get("mcp_method") if current_action else None,
+            },
+        )
         if state.current_action_index >= len(state.planned_actions):
             logger.debug("No more actions to execute in the current plan.")
             return state
@@ -664,8 +719,17 @@ class Agent:
         state.current_action_index += 1
         return state
 
+    @observe()
     async def _evaluate_results(self, state: AgentState) -> AgentState:
         """Evaluate action results to determine if replanning is needed."""
+        # Update observation metadata
+        update_observation_metadata(
+            name="Evaluate Results",
+            metadata={
+                "has_error": bool(state.error),
+                "action_index": state.current_action_index - 1,
+            },
+        )
         if not state.mcp_results or state.error:  # Skip if no results or critical error occurred
             return state
 
@@ -716,8 +780,19 @@ class Agent:
 
         return state
 
+    @observe()
     async def _replan_actions(self, state: AgentState) -> AgentState:
         """Replan actions based on execution errors."""
+        # Update observation metadata
+        update_observation_metadata(
+            name="Replan Actions",
+            metadata={
+                "replan_count": state.replan_count,
+                "max_attempts": state.max_replan_attempts,
+                "last_error": state.execution_context.get("last_error"),
+            },
+            level="WARNING" if state.replan_count > 1 else "INFO",
+        )
         logger.info("Replanning actions due to execution issues...")
 
         if state.replan_count >= state.max_replan_attempts:
@@ -862,8 +937,18 @@ class Agent:
 
         return state
 
+    @observe()
     async def _generate_response(self, state: AgentState) -> AgentState:
         """Generate final response based on all gathered information."""
+        # Update observation metadata
+        update_observation_metadata(
+            name="Generate Response",
+            metadata={
+                "has_mcp_results": bool(state.mcp_results),
+                "thought_count": len(state.thoughts),
+                "db_connected": self._db_connected,
+            },
+        )
         logger.info("Generating final response...")
 
         # Format results and history for the LLM
@@ -1137,8 +1222,15 @@ class Agent:
 
     # --- Main method ---
 
+    @observe()
     async def run(self, query: str, session_id: Optional[str] = None) -> AgentState:
         """Execute the complete agent workflow."""
+        # Update observation metadata
+        update_observation_metadata(
+            name="Agent Run",
+            input={"query": query, "session_id": session_id},
+            metadata={"streaming": False},
+        )
         logger.info(f"Starting agent run for query: '{query[:50]}...'")
 
         # Update connection status

@@ -224,6 +224,9 @@ class LLMConnector:
 
         url = f"{self._last_base_url}/v1/chat/completions"
 
+        # Track the complete response for observability
+        full_response = ""
+
         try:
             timeout = aiohttp.ClientTimeout(total=120, connect=30)  # Longer timeout for streaming
             async with self._session.post(url, json=payload, timeout=timeout) as response:

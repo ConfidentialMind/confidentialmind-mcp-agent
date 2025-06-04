@@ -7,6 +7,7 @@ from typing import Any, AsyncIterator
 from confidentialmind_core.config_manager import load_environment
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from langfuse.decorators import langfuse_context, observe
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -89,11 +90,17 @@ mcp_server = FastMCP(
 
 
 @mcp_server.resource("postgres://schemas")
+@observe()
 async def get_schemas() -> dict[str, list[dict]]:
     """
     Retrieves the schemas (table names, columns, types) for all tables
     accessible by the connected database user. Excludes system tables.
     """
+    # Update observation metadata
+    langfuse_context.update_current_observation(
+        name="Postgres Get Schemas",
+        metadata={"tool": "postgres_mcp", "operation": "get_schemas"},
+    )
     # Use direct pool access instead of context
     pool = ConnectionManager.get_pool()
 
@@ -103,7 +110,15 @@ async def get_schemas() -> dict[str, list[dict]]:
 
     client = DatabaseClient(pool)
     try:
-        return await client.get_table_schemas()
+        schemas = await client.get_table_schemas()
+
+        # Update observation with results
+        langfuse_context.update_current_observation(
+            output=schemas,
+            metadata={"tables_count": len(schemas.get("schemas", []))},
+        )
+
+        return schemas
     except DatabaseUnavailableError:
         raise RuntimeError("Database connection is not available yet. Please try again later.")
     except Exception as e:
@@ -112,6 +127,7 @@ async def get_schemas() -> dict[str, list[dict]]:
 
 
 @mcp_server.tool()
+@observe()
 async def execute_sql(sql_query: str) -> list[dict]:
     """
     Executes a read-only SQL query (must start with SELECT, WITH, or EXPLAIN
@@ -126,6 +142,12 @@ async def execute_sql(sql_query: str) -> list[dict]:
         A list of dictionaries, where each dictionary represents a row
         with column names as keys.
     """
+    # Update observation metadata
+    langfuse_context.update_current_observation(
+        name="Postgres Execute SQL",
+        input={"sql_query": sql_query},
+        metadata={"tool": "postgres_mcp", "operation": "execute_sql"},
+    )
     # Use direct pool access instead of context
     pool = ConnectionManager.get_pool()
 
@@ -137,11 +159,22 @@ async def execute_sql(sql_query: str) -> list[dict]:
     try:
         results = await client.execute_readonly_query(sql_query)
         logger.info(f"Executed query successfully, returned {len(results)} rows.")
+
+        # Update observation with results
+        langfuse_context.update_current_observation(
+            output=results,
+            metadata={"rows_count": len(results)},
+        )
+
         return results
     except DatabaseUnavailableError:
         raise RuntimeError("Database connection is not available yet. Please try again later.")
     except QueryValidationError as e:
         logger.warning(f"SQL query validation failed: {e}")
+        langfuse_context.update_current_observation(
+            level="WARNING",
+            status_message=f"Query validation failed: {str(e)}",
+        )
         raise ToolError(str(e))
     except Exception as e:
         logger.error(f"Failed to execute SQL query: {e}")
