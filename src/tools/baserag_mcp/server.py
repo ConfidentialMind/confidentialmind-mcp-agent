@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -9,11 +10,30 @@ from fastmcp import Context, FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from src.shared.logging.config import get_logger
+from src.shared.logging.trace_context import TraceContext
+
 from .api_client import APIConnectionError, APIError, BaseRAGClient
 from .connection_manager import ConnectionManager
 from .settings import settings
 
 logger = logging.getLogger(__name__)
+structlog_logger = get_logger("baserag.mcp")
+
+
+def extract_trace_headers(ctx: Context) -> Dict[str, str]:
+    """Extract trace headers from FastMCP context."""
+    trace_headers = {}
+    if hasattr(ctx, "request_context") and hasattr(ctx.request_context, "headers"):
+        headers = ctx.request_context.headers
+        trace_headers = {
+            "trace_id": headers.get("X-Trace-ID"),
+            "span_id": headers.get("X-Span-ID"),
+            "parent_span_id": headers.get("X-Parent-Span-ID"),
+            "session_id": headers.get("X-Session-ID"),
+            "origin_service": headers.get("X-Origin-Service"),
+        }
+    return trace_headers
 
 
 @asynccontextmanager
@@ -198,21 +218,89 @@ async def get_context(query: str, ctx: Context) -> Dict[str, Any]:
         ]
     }
     """
+    # Extract trace headers
+    trace_headers = extract_trace_headers(ctx)
+
+    # Initialize trace context from headers if available
+    if trace_headers.get("trace_id"):
+        TraceContext.initialize(
+            session_id=trace_headers.get("session_id", "unknown"),
+            trace_id=trace_headers.get("trace_id"),
+            origin_service=trace_headers.get("origin_service", "unknown"),
+            parent_span_id=trace_headers.get("span_id"),
+        )
+
+    structlog_logger.info(
+        "Starting context retrieval",
+        event_type="baserag.context.start",
+        data={
+            "query_length": len(query),
+            "query_preview": query[:100] + "..." if len(query) > 100 else query,
+        },
+    )
+
+    start_time = time.time()
+
     if not ctx.request_context.lifespan_context.get("api_connected", False):
+        structlog_logger.info(
+            "BaseRAG API not connected",
+            event_type="baserag.context.no_connection",
+            data={"error": "BaseRAG API not connected"},
+        )
         logger.error("BaseRAG API not connected when retrieving context.")
         raise RuntimeError("BaseRAG API connection is not available yet. Please try again later.")
 
     try:
         result = await BaseRAGClient.get_context(query)
+
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.info(
+            "Context retrieval completed",
+            event_type="baserag.context.complete",
+            duration_ms=duration_ms,
+            success=True,
+            data={"result_count": len(result.get("contexts", []))},
+        )
+
         await ctx.info(f"Retrieved context for query: {query}")
         return result
+
     except APIConnectionError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "API connection error during context retrieval",
+            event_type="baserag.context.error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type="APIConnectionError",
+        )
         logger.error(f"API connection error while retrieving context: {e}")
         raise RuntimeError(f"BaseRAG API connection error: {str(e)}")
+
     except APIError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "API error during context retrieval",
+            event_type="baserag.context.error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type="APIError",
+        )
         logger.error(f"API error while retrieving context: {e}")
         raise RuntimeError(f"BaseRAG API error: {str(e)}")
+
     except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "Unexpected error during context retrieval",
+            event_type="baserag.context.error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         logger.error(f"Unexpected error while retrieving context: {e}")
         raise RuntimeError(f"Error retrieving context: {str(e)}")
 
@@ -360,6 +448,31 @@ async def chat_completion(
         }
     }
     """
+    # Extract trace headers
+    trace_headers = extract_trace_headers(ctx)
+
+    # Initialize trace context from headers if available
+    if trace_headers.get("trace_id"):
+        TraceContext.initialize(
+            session_id=trace_headers.get("session_id", "unknown"),
+            trace_id=trace_headers.get("trace_id"),
+            origin_service=trace_headers.get("origin_service", "unknown"),
+            parent_span_id=trace_headers.get("span_id"),
+        )
+
+    structlog_logger.info(
+        "Starting chat completion",
+        event_type="baserag.chat.start",
+        data={
+            "model": model,
+            "temperature": temperature,
+            "message_count": len(messages),
+            "stream": stream,
+        },
+    )
+
+    start_time = time.time()
+
     if not ctx.request_context.lifespan_context.get("api_connected", False):
         logger.error("BaseRAG API not connected when generating chat completion.")
         raise RuntimeError("BaseRAG API connection is not available yet. Please try again later.")
@@ -389,18 +502,59 @@ async def chat_completion(
             response_content[:100] + "..." if len(response_content) > 100 else response_content
         )
 
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.info(
+            "Chat completion completed",
+            event_type="baserag.chat.complete",
+            duration_ms=duration_ms,
+            success=True,
+            data={
+                "user_query_preview": user_message[:50] + "..."
+                if len(user_message) > 50
+                else user_message,
+                "response_preview": truncated_response,
+            },
+        )
+
         await ctx.info(
             f"Generated completion for: '{user_message[:50]}...' → '{truncated_response}'"
         )
 
         return result
     except APIConnectionError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "API connection error during chat completion",
+            event_type="baserag.chat.error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type="APIConnectionError",
+        )
         logger.error(f"API connection error while generating chat completion: {e}")
         raise RuntimeError(f"BaseRAG API connection error: {str(e)}")
     except APIError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "API error during chat completion",
+            event_type="baserag.chat.error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type="APIError",
+        )
         logger.error(f"API error while generating chat completion: {e}")
         raise RuntimeError(f"BaseRAG API error: {str(e)}")
     except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "Unexpected error during chat completion",
+            event_type="baserag.chat.error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         logger.error(f"Unexpected error while generating chat completion: {e}")
         raise RuntimeError(f"Error generating chat completion: {str(e)}")
 

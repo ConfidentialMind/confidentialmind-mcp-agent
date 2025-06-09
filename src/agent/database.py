@@ -12,6 +12,7 @@ from pydantic_settings import BaseSettings
 
 from src.agent.connectors import ConnectorConfigManager
 from src.agent.state import Message
+from src.shared.logging import get_current_trace, get_logger, traced_async
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -116,6 +117,9 @@ class Database:
         self._current_db_url: Optional[str] = None
         self._config_id: str = os.environ.get("DB_CONFIG_ID", "DATABASE")
         self._background_fetch_task: Optional[asyncio.Task] = None
+
+        # Use structlog logger
+        self.logger = get_logger("agent.database")
 
         # Load environment variables to set LOCAL_CONFIG flag
         load_environment()
@@ -261,6 +265,7 @@ class Database:
 
             logger.info("Database: Connected successfully")
             self._connection_error = None
+
             return True
 
         except Exception as e:
@@ -352,9 +357,10 @@ class Database:
 
     # Session history methods
 
+    @traced_async("db.operation.load_history", "agent.database")
     async def load_history(self, session_id: str, conversation_id: str = None) -> List[Message]:
         """
-        Load conversation history from the database for a session or conversation.
+        Load conversation history with trace logging.
 
         If the database is not connected, returns an empty list,
         allowing the agent to operate in stateless mode.
@@ -367,6 +373,11 @@ class Database:
             List of messages in the conversation
         """
         if not self.is_connected():
+            self.logger.info(
+                "Cannot load history - database not connected",
+                event_type="db.history.load_skipped",
+                data={"reason": "not_connected", "identifier": conversation_id or session_id},
+            )
             logger.warning("Database: Not connected. Running in stateless mode.")
             return []
 
@@ -377,13 +388,15 @@ class Database:
                 # Use conversation-based lookup
                 results = await self.execute_query(
                     """
-                    SELECT role, content
+                    SELECT role, content, trace_id
                     FROM conversation_messages
                     WHERE conversation_id = $1
                     ORDER BY chain_position
                     """,
                     conversation_id,
                 )
+                identifier = conversation_id
+                identifier_type = "conversation"
                 logger.debug(
                     f"Database: Loaded {len(results)} messages for conversation {conversation_id}"
                 )
@@ -391,33 +404,66 @@ class Database:
                 # Use session-based lookup (existing behavior)
                 results = await self.execute_query(
                     """
-                    SELECT role, content
+                    SELECT role, content, trace_id
                     FROM conversation_messages
                     WHERE session_id = $1
                     ORDER BY message_order
                     """,
                     session_id,
                 )
+                identifier = session_id
+                identifier_type = "session"
                 logger.debug(f"Database: Loaded {len(results)} messages for session {session_id}")
 
             messages = [Message(role=row["role"], content=row["content"]) for row in results]
+
+            # Log history load metrics
+            self.logger.info(
+                "Conversation history loaded",
+                event_type="db.history.loaded",
+                data={
+                    "identifier": identifier,
+                    "identifier_type": identifier_type,
+                    "message_count": len(messages),
+                    "unique_traces": len(
+                        set(r.get("trace_id") for r in results if r.get("trace_id"))
+                    ),
+                },
+            )
+
             return messages
         except Exception as e:
             identifier = conversation_id if conversation_id else session_id
+            self.logger.error(
+                "Failed to load conversation history",
+                event_type="db.history.load_error",
+                error=str(e),
+                error_type=type(e).__name__,
+                data={"identifier": identifier},
+            )
             logger.error(f"Database: Error loading history for {identifier}: {e}")
             return []  # Return empty history on error
 
+    @traced_async("db.operation.save_message", "agent.database")
     async def save_message(self, session_id: str, message: Message) -> bool:
         """
-        Save a message to the database for a session.
+        Save a message with trace information.
 
         If the database is not connected, returns False but doesn't raise an exception.
         """
         if not self.is_connected():
+            self.logger.warning(
+                "Cannot save message - database not connected",
+                event_type="db.save_message.skipped",
+                data={"reason": "not_connected", "session_id": session_id},
+            )
             logger.warning("Database: Not connected. Cannot save message.")
             return False
 
         try:
+            # Get current trace context
+            trace = get_current_trace()
+
             await self.ensure_connected()
             max_order = await self.execute_query(
                 "SELECT MAX(message_order) FROM conversation_messages WHERE session_id = $1",
@@ -425,21 +471,47 @@ class Database:
                 fetch_type="val",
             )
             message_order = 0 if max_order is None else max_order + 1
+
+            # Include trace information in the insert
             await self.execute_query(
                 """
                 INSERT INTO conversation_messages
-                (session_id, message_order, role, content, timestamp)
-                VALUES ($1, $2, $3, $4, NOW())
+                (session_id, message_order, role, content, timestamp, trace_id, span_id, api_key_hash)
+                VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7)
                 """,
                 session_id,
                 message_order,
                 message.role,
                 message.content,
+                trace.trace_id if trace else None,
+                trace.span_id if trace else None,
+                trace.api_key_hash if trace else None,
                 fetch_type="none",
             )
+
+            self.logger.info(
+                "Message saved successfully",
+                event_type="db.message.saved",
+                data={
+                    "session_id": session_id,
+                    "message_order": message_order,
+                    "role": message.role,
+                    "content_length": len(message.content),
+                    "has_trace": trace is not None,
+                },
+            )
+
             logger.debug(f"Database: Saved message for session {session_id} order {message_order}")
             return True
         except Exception as e:
+            self.logger.error(
+                "Failed to save message",
+                event_type="db.message.save_error",
+                error=str(e),
+                error_type=type(e).__name__,
+                data={"session_id": session_id},
+            )
+
             if not self.is_connected():
                 logger.warning(
                     f"Database: Not connected while saving msg for {session_id}: {self.last_error()}"
@@ -573,7 +645,7 @@ class Database:
                 fetch_type="val",
             )
             start_position = 0 if max_position is None else max_position + 1
-            
+
             # Get max message order for session (using conversation_id as session_id)
             max_order = await self.execute_query(
                 "SELECT MAX(message_order) FROM conversation_messages WHERE session_id = $1",
@@ -761,7 +833,7 @@ class Database:
 
     async def ensure_schema(self) -> bool:
         """
-        Ensure necessary database tables exist
+        Ensure necessary database tables exist (conversation history only)
 
         If the database is not connected, returns False but doesn't raise an exception.
         """
@@ -792,7 +864,10 @@ class Database:
                         conversation_id VARCHAR,
                         message_hash VARCHAR,
                         chain_position INTEGER,
-                        parent_hash VARCHAR
+                        parent_hash VARCHAR,
+                        trace_id VARCHAR(36),
+                        span_id VARCHAR(36),
+                        api_key_hash VARCHAR(16)
                     );
                     
                     CREATE INDEX IF NOT EXISTS idx_conversation_messages_session_id 
@@ -806,6 +881,9 @@ class Database:
                     
                     CREATE INDEX IF NOT EXISTS idx_conversation_messages_hash
                     ON conversation_messages(message_hash);
+                    
+                    CREATE INDEX IF NOT EXISTS idx_conversation_messages_trace_id
+                    ON conversation_messages(trace_id);
                     """,
                     fetch_type="none",
                 )
@@ -825,6 +903,7 @@ class Database:
                     fetch_type="none",
                 )
                 logger.info("Database: Created conversation_chains table")
+
                 return True
             else:  # validate table structure
                 expected_columns = {
@@ -838,6 +917,9 @@ class Database:
                     "message_hash": {"data_type": "character varying", "is_nullable": "YES"},
                     "chain_position": {"data_type": "integer", "is_nullable": "YES"},
                     "parent_hash": {"data_type": "character varying", "is_nullable": "YES"},
+                    "trace_id": {"data_type": "character varying", "is_nullable": "YES"},
+                    "span_id": {"data_type": "character varying", "is_nullable": "YES"},
+                    "api_key_hash": {"data_type": "character varying", "is_nullable": "YES"},
                 }
 
                 # Get actual columns
@@ -886,6 +968,21 @@ class Database:
                                 "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS parent_hash VARCHAR",
                                 fetch_type="none",
                             )
+                        elif col == "trace_id":
+                            await self.execute_query(
+                                "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS trace_id VARCHAR(36)",
+                                fetch_type="none",
+                            )
+                        elif col == "span_id":
+                            await self.execute_query(
+                                "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS span_id VARCHAR(36)",
+                                fetch_type="none",
+                            )
+                        elif col == "api_key_hash":
+                            await self.execute_query(
+                                "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS api_key_hash VARCHAR(16)",
+                                fetch_type="none",
+                            )
                     logger.info("Database: Added missing columns successfully")
 
                 # Check for columns with wrong type or nullability
@@ -907,6 +1004,7 @@ class Database:
                     "idx_conversation_messages_order",
                     "idx_conversation_messages_conv_chain",
                     "idx_conversation_messages_hash",
+                    "idx_conversation_messages_trace_id",
                 ]
 
                 indices = await self.execute_query(
@@ -953,6 +1051,14 @@ class Database:
                                 """
                                 CREATE INDEX IF NOT EXISTS idx_conversation_messages_hash
                                 ON conversation_messages(message_hash)
+                                """,
+                                fetch_type="none",
+                            )
+                        elif idx == "idx_conversation_messages_trace_id":
+                            await self.execute_query(
+                                """
+                                CREATE INDEX IF NOT EXISTS idx_conversation_messages_trace_id
+                                ON conversation_messages(trace_id)
                                 """,
                                 fetch_type="none",
                             )
