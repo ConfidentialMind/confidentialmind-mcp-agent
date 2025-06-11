@@ -1,6 +1,6 @@
 # FastMCP Agent
 
-A flexible FastMCP client application that interacts with MCP servers to execute complex workflows using either CLI or API mode. The agent supports configurable transport options (stdio/streamable-HTTP) and includes an OpenAI API-compatible endpoint.
+A flexible FastMCP client application that interacts with MCP servers to execute complex workflows using either CLI or API mode. The agent supports configurable transport options and includes an OpenAI API-compatible endpoint with comprehensive observability features.
 
 ## Features
 
@@ -19,6 +19,12 @@ A flexible FastMCP client application that interacts with MCP servers to execute
   - Automatic schema validation and creation
   - Connection pooling with reconnection logic
   - PostgreSQL-based session management
+- **Comprehensive Observability**:
+  - **Structured JSON Logging**: All operations logged in OpenTelemetry-compatible format
+  - **Distributed Tracing**: End-to-end request correlation across all MCP servers
+  - **Performance Monitoring**: Detailed timing for all workflow stages
+  - **Error Context**: Rich error logging with workflow state and retry information
+  - **Debug & Production Modes**: Human-readable logs in development, JSON in production
 - **Intelligent Agent Workflow**:
   - **Multi-stage processing**:
     1. Initialize context - discover available tools and resources
@@ -32,62 +38,23 @@ A flexible FastMCP client application that interacts with MCP servers to execute
   - Drop-in replacement for OpenAI's chat completions API
   - Session management via headers or cookies
 
-## Installation
+## Requirements
 
-```bash
-# Clone the repository
-git clone git@github.com:ConfidentialMind/confidentialmind-mcp-agent.git
-
-# Navigate to project root
-cd confidentialmind-mcp-agent
-
-# Install uv (https://docs.astral.sh/uv/getting-started/installation/)
-## MacOS:
-brew install uv
-
-## or
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Create virtual environment
-uv venv --python 3.10
-
-# Activate the virtual environment
-source .venv/bin/activate
-
-# Install dependencies
-uv pip install -e .
-```
-
-## Operational Modes
-
-The agent supports two main operational modes:
-
-### 1. Local Development Mode
-
-In local development mode:
-
-- Configuration loaded from `.env` file and environment variables
-- Connection details retrieved from environment with pattern `{CONFIG_ID}_URL` and `{CONFIG_ID}_APIKEY`
-- Services can be configured independently
-
-### 2. Stack Deployment Mode
-
-In stack deployment mode:
-
-- Automatically registers connectors with ConfigManager
-- Discovers service URLs dynamically from the stack
-- Continuously polls for URL changes in the background
-- Operates gracefully even when services become available after startup
+- Python 3.10+
+- Access to a PostgreSQL database
+- FastMCP-compatible MCP servers
+- Access to confidentialmind_core SDK
 
 ## Configuration
 
 ### Environment Variables
 
 - `MCP_SERVER_*`: MCP servers in the format MCP_SERVER_NAME=url
-- (*Deprecating*) `AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
+- (_Deprecating_) `AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
 - `DB_CONFIG_ID`: Database connector config ID (default: DATABASE)
 - `LLM_CONFIG_ID`: LLM service config ID (default: LLM)
 - `CONFIDENTIAL_MIND_LOCAL_CONFIG`: Set to "False" for stack deployment mode
+- `DEBUG`: Set to "true" for human-readable console logs in development
 
 ### Config File
 
@@ -239,6 +206,96 @@ Response:
 }
 ```
 
+## Observability Features
+
+The agent provides comprehensive observability through structured logging and distributed tracing:
+
+### Structured JSON Logging
+
+All operations are logged in OpenTelemetry-compatible JSON format with consistent event taxonomy:
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:45.123Z",
+  "level": "info",
+  "logger": "agent.core",
+  "event": "Agent workflow completed",
+  "event_type": "agent.workflow.complete",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440000",
+  "span_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  "session_id": "user-session-123",
+  "duration_ms": 2150.5,
+  "success": true,
+  "data": {
+    "query_preview": "What tools are available?",
+    "action_count": 3,
+    "replan_count": 0,
+    "response_length": 245
+  }
+}
+```
+
+### Event Types
+
+The agent emits events with hierarchical taxonomy:
+
+**Workflow Events:**
+
+- `agent.workflow.start` - Agent processing initiated
+- `agent.workflow.complete` - Complete workflow finished
+- `agent.discovery.start` - Tool discovery phase
+- `agent.planning.complete` - Query planning finished
+
+**MCP Operations:**
+
+- `mcp.call.start` - MCP tool call initiated
+- `mcp.call.complete` - MCP tool call finished
+- `transport.configure` - MCP transport configured
+
+**Database Operations:**
+
+- `db.message.saved` - Message saved to database
+- `db.history.loaded` - Conversation history loaded
+
+**Streaming Events:**
+
+- `agent.streaming.start` - Streaming response initiated
+- `agent.streaming.complete` - Streaming response finished
+- `agent.streaming.metrics` - Streaming performance metrics
+
+### Distributed Tracing
+
+Request traces flow through the entire agent workflow:
+
+- Agent API → Agent Core → MCP Transports → MCP Servers → Backend Services
+- Automatic trace context propagation via HTTP headers
+- Parent-child span relationships across all operations
+- Performance timing for each workflow stage
+
+### Debug vs Production Logging
+
+**Development Mode** (`DEBUG=true`):
+
+```bash
+2024-01-15 10:30:45 [info] Starting agent workflow
+├── trace_id: 550e8400-e29b-41d4-a716-446655440000
+├── span_id: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+└── data: {"query_preview": "What tools are available?"}
+```
+
+**Production Mode** (`DEBUG=false`):
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:45.123Z",
+  "level": "info",
+  "event": "Starting agent workflow",
+  "event_type": "agent.workflow.start",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440000",
+  "data": { "query_preview": "What tools are available?" }
+}
+```
+
 ## Session Management
 
 Session IDs can be provided in one of these ways:
@@ -250,41 +307,47 @@ Session IDs can be provided in one of these ways:
 
 ## Agent Workflow
 
-The agent follows a multi-stage workflow for processing queries:
+The agent follows a multi-stage workflow for processing queries with full observability at each stage:
 
 1. **Initialize Context**:
 
    - Discover available tools and resources from MCP servers
    - Set up execution context with available capabilities
+   - Log tool discovery metrics and connection status
 
 2. **Parse Query**:
 
    - Use LLM to understand the user's intent
    - Create a plan with specific actions to execute
    - Determine which MCP servers and tools are needed
+   - Log planning results and action count
 
 3. **Execute MCP Actions**:
 
    - Call tools on appropriate MCP servers
    - Process results and handle any errors
    - Track execution state for complex workflows
+   - Log each MCP call with timing and results
 
 4. **Evaluate Results**:
 
    - Check if actions were successful
    - Identify errors or unexpected results
    - Determine if replanning is necessary
+   - Log evaluation decisions and error analysis
 
 5. **Replan Actions** (if needed):
 
    - Use LLM to generate a revised plan based on errors
    - Adjust subsequent actions to recover from failures
    - Create new approach to solve the original intent
+   - Log replanning attempts and strategies
 
 6. **Generate Response**:
    - Create a coherent response from all gathered information
    - Format data appropriately for the user
    - Include error explanations if things went wrong
+   - Log response generation metrics and streaming performance
 
 ## Connecting MCP Servers
 
@@ -328,6 +391,7 @@ The agent uses a modular architecture with these key components:
 - **Agent**: Core workflow logic for executing MCP-based queries
 - **Database**: Session management and history storage
 - **LLMConnector**: Interface to language model services
+- **Shared Logging**: Structured logging and distributed tracing system
 
 ### Running Tests
 
@@ -353,12 +417,35 @@ python -m src.agent.main query "Debug this" --debug
 python -m src.agent.main serve --debug
 ```
 
+This enables human-readable console output with trace information and detailed workflow logging.
+
+### Log Analysis
+
+Monitor agent performance and troubleshoot issues:
+
+```bash
+# Monitor workflow performance
+cat logs/agent.log | jq 'select(.event_type == "agent.workflow.complete") | {duration_ms, success, action_count}'
+
+# Analyze MCP call performance
+cat logs/agent.log | jq 'select(.event_type == "mcp.call.complete") | {server_id, tool_name, duration_ms, success}'
+
+# Track streaming metrics
+cat logs/agent.log | jq 'select(.event_type == "agent.streaming.metrics") | {chunk_count, streaming_duration_ms, total_duration_ms}'
+
+# Monitor errors and replanning
+cat logs/agent.log | jq 'select(.event_type | endswith(".error")) | {error, error_type, data}'
+```
+
 ## Resilience Features
 
-The agent includes several resilience features:
+The agent includes several resilience features with full observability:
 
-- **Connection Retries**: Automatic reconnection with exponential backoff
-- **Background Polling**: Continuous polling for URL changes in stack mode
-- **Graceful Degradation**: Operation with partial service availability
-- **Error Recovery**: Replanning logic to handle action failures
-- **Stateless Fallback**: Can operate without database connection if needed
+- **Connection Retries**: Automatic reconnection with exponential backoff (logged with retry metrics)
+- **Background Polling**: Continuous polling for URL changes in stack mode (with polling statistics)
+- **Graceful Degradation**: Operation with partial service availability (with capability logging)
+- **Error Recovery**: Replanning logic to handle action failures (with replanning metrics)
+- **Stateless Fallback**: Can operate without database connection if needed (with connection status logging)
+- **Comprehensive Monitoring**: Full observability for troubleshooting and performance analysis
+
+For complete observability documentation and best practices, see [guides/observability.md](../../guides/observability_guide.md).

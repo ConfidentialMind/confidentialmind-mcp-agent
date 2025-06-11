@@ -1,6 +1,6 @@
 # ConfidentialMind MCP Agent
 
-A flexible FastMCP client application for interacting with Model Context Protocol (MCP) servers to execute complex workflows. The agent supports both CLI and API modes with configurable transport options and includes an OpenAI API-compatible endpoint.
+A flexible FastMCP client application for interacting with Model Context Protocol (MCP) servers to execute complex workflows. The agent supports both CLI and API modes with configurable transport options and includes an OpenAI API-compatible endpoint with comprehensive observability features.
 
 ## Overview
 
@@ -11,6 +11,7 @@ The ConfidentialMind MCP Agent serves as a bridge between users and MCP servers,
 - Execute complex workflows with automatic error handling and replanning
 - Maintain conversation context across sessions
 - Operate as either a CLI tool or an API server with OpenAI compatibility
+- Provide comprehensive observability with structured JSON logging and distributed tracing
 
 ## Features
 
@@ -36,6 +37,14 @@ The ConfidentialMind MCP Agent serves as a bridge between users and MCP servers,
   - Automatic schema validation and creation
   - Connection pooling with reconnection logic
   - PostgreSQL-based session management
+
+- **Comprehensive Observability**:
+
+  - **Structured JSON Logging**: All logs compatible with OpenTelemetry Collector
+  - **Distributed Tracing**: Request correlation across service boundaries
+  - **Performance Monitoring**: Operation timing and metrics tracking
+  - **Error Context**: Rich error logging with stack traces and operation context
+  - **Debug & Production Modes**: Human-readable logs in development, JSON in production
 
 - **Intelligent Agent Workflow**:
 
@@ -89,6 +98,7 @@ In local development mode:
 - Configuration loaded from `.env` file and environment variables
 - Connection details retrieved from environment with pattern `{CONFIG_ID}_URL` and `{CONFIG_ID}_APIKEY`
 - Services can be configured independently
+- Human-readable logging for development
 
 ### 2. Stack Deployment Mode
 
@@ -98,16 +108,18 @@ In stack deployment mode:
 - Discovers service URLs dynamically from the stack
 - Continuously polls for URL changes in the background
 - Operates gracefully even when services become available after startup
+- Structured JSON logging for production observability
 
 ## Configuration
 
 ### Environment Variables
 
 - `MCP_SERVER_*`: MCP servers in the format MCP_SERVER_NAME=url
-- (*Deprecating*)`AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
+- (_Deprecating_)`AGENT_TOOLS_URL`: Default URL of the MCP server (default: <http://localhost:8080/mcp>)
 - `DB_CONFIG_ID`: Database connector config ID (default: DATABASE)
 - `LLM_CONFIG_ID`: LLM service config ID (default: LLM)
 - `CONFIDENTIAL_MIND_LOCAL_CONFIG`: Set to "False" for stack deployment mode
+- `DEBUG`: Set to "true" for human-readable logs in development
 
 ### Config File
 
@@ -261,6 +273,54 @@ Response:
 }
 ```
 
+## Observability Features
+
+The system includes comprehensive observability with structured logging and distributed tracing:
+
+### Structured JSON Logging
+
+All logs are output in JSON format compatible with OpenTelemetry Collector:
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:45.123Z",
+  "level": "info",
+  "logger": "agent.core",
+  "event": "Starting agent workflow",
+  "event_type": "agent.workflow.start",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440000",
+  "span_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  "session_id": "user-session-123",
+  "duration_ms": 150.5,
+  "success": true,
+  "data": {
+    "query_preview": "What tools are available?",
+    "action_count": 3
+  }
+}
+```
+
+### Distributed Tracing
+
+Request traces flow across all service boundaries:
+
+- Agent API → MCP Servers → Backend Services
+- Automatic trace context propagation via HTTP headers
+- Parent-child span relationships
+- Performance timing for all operations
+
+### Event Types
+
+Consistent event taxonomy for log analysis:
+
+- `agent.workflow.*` - Agent processing stages
+- `mcp.transport.*` - MCP client operations
+- `sql.query.*` - Database operations
+- `tool.execution.*` - Tool invocations
+- `health.check.*` - Health monitoring
+
+For complete observability documentation, see [guides/observability.md](guides/observability_guide.md).
+
 ## Session Management
 
 Session IDs can be provided in one of these ways:
@@ -318,10 +378,20 @@ A FastMCP server providing read-only access to PostgreSQL databases. It allows:
 
 - Schema inspection via the `postgres://schemas` resource
 - SQL query execution via the `execute_sql` tool (read-only)
+- Comprehensive observability with structured logging and performance tracking
 
 For more details on the PostgreSQL MCP server, see `src/tools/postgres_mcp/README.md`.
 
-Additional MCP servers will be added in the future to expand the agent's capabilities.
+### BaseRAG MCP Server
+
+A FastMCP server providing access to BaseRAG's retrieval-augmented generation capabilities:
+
+- Context retrieval from knowledge bases
+- Content access by ID
+- RAG-enhanced chat completions
+- Full observability integration
+
+For more details on the BaseRAG MCP server, see `src/tools/baserag_mcp/README.md`.
 
 ## Connecting MCP Servers
 
@@ -347,7 +417,7 @@ Example `postgres_config.json`:
 
 ## Docker Support
 
-Docker configurations are provided for both the agent and PostgreSQL MCP server:
+Docker configurations are provided for both the agent and MCP servers:
 
 ```bash
 # Build the agent container
@@ -381,6 +451,7 @@ The agent uses a modular architecture with these key components:
 - **Agent**: Core workflow logic for executing MCP-based queries
 - **Database**: Session management and history storage
 - **LLMConnector**: Interface to language model services
+- **Shared Logging**: Structured logging and distributed tracing
 
 ### Running Tests
 
@@ -404,12 +475,15 @@ python -m src.agent.main query "Debug this" --debug
 python -m src.agent.main serve --debug
 ```
 
+This enables human-readable console output with trace information for development.
+
 ## Additional Documentation
 
 - For more details on the agent implementation, see `src/agent/README.md`
 - For PostgreSQL MCP server documentation, see `src/tools/postgres_mcp/README.md`
 - For BaseRAG MCP server documentation, see `src/tools/baserag_mcp/README.md`
-- For guidance on building MCP servers, see `guides/mcp_server_guide.md`
+- **For observability features and JSON logging, see `guides/observability.md`**
+- For guidance on building MCP servers with observability, see `guides/mcp_server_guide.md`
 - For details on ConfidentialMind connection management, see `guides/confidentialmind.md`
 - For a guide on containerizing MCP servers, see `guides/mcp_containerization.md`
 
@@ -422,3 +496,4 @@ The agent includes several resilience features:
 - **Graceful Degradation**: Operation with partial service availability
 - **Error Recovery**: Replanning logic to handle action failures
 - **Stateless Fallback**: Can operate without database connection if needed
+- **Comprehensive Monitoring**: Full observability for troubleshooting and performance analysis

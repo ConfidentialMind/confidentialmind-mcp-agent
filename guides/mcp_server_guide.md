@@ -13,6 +13,7 @@ This guide walks you through creating a FastMCP server that integrates with the 
   - [Step 3: Server Configuration](#step-3-server-configuration)
   - [Step 4: Tools and Resources](#step-4-tools-and-resources)
   - [Step 5: Running the Server](#step-5-running-the-server)
+- [Observability Integration](#observability-integration)
 - [Local vs. Stack Deployment](#local-vs-stack-deployment)
 - [Testing Your Server](#testing-your-server)
 - [Advanced Patterns](#advanced-patterns)
@@ -29,6 +30,7 @@ This guide will show you how to build MCP servers that:
 - Register with the ConfidentialMind configuration manager
 - Gracefully handle service availability
 - Follow best practices for resilience
+- Include comprehensive observability with structured logging and distributed tracing
 
 ## Key Concepts
 
@@ -46,6 +48,12 @@ Before diving into the code, it's important to understand these key concepts:
 - **Connectors**: Service connection configurations (databases, LLMs, etc.)
 - **Stack Deployment**: Production deployment mode where services discover each other
 - **Local Development**: Development mode where services are configured locally
+
+**Observability Concepts:**
+
+- **Structured Logging**: JSON-formatted logs compatible with OpenTelemetry Collector
+- **Distributed Tracing**: Request tracing across service boundaries with trace/span IDs
+- **Event Types**: Hierarchical event classification for log analysis
 
 ## Project Structure
 
@@ -362,27 +370,45 @@ Now create the FastMCP server with tools and resources:
 import asyncio
 import datetime
 import logging
+import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, List
+from typing import Any, AsyncIterator, Dict
 
 from confidentialmind_core.config_manager import load_environment
 from fastmcp import Context, FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+# Import observability components
+from src.shared.logging import get_logger, TraceContext
+
 from .connection_manager import ConnectionManager
 from .settings import settings
 
 logger = logging.getLogger(__name__)
+# Create structured logger for observability
+structlog_logger = get_logger("myservice.mcp")
+
+
+def extract_trace_headers(ctx: Context) -> Dict[str, str]:
+    """Extract trace headers from FastMCP context for distributed tracing."""
+    trace_headers = {}
+    if hasattr(ctx, "request_context") and hasattr(ctx.request_context, "headers"):
+        headers = ctx.request_context.headers
+        trace_headers = {
+            "trace_id": headers.get("X-Trace-ID"),
+            "span_id": headers.get("X-Span-ID"),
+            "parent_span_id": headers.get("X-Parent-Span-ID"),
+            "session_id": headers.get("X-Session-ID"),
+            "origin_service": headers.get("X-Origin-Service"),
+        }
+    return trace_headers
+
 
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
-    Handles service setup and teardown with ConfidentialMind support.
-
-    This function allows the server to start without a connection,
-    which is required for stack deployment scenarios where services
-    might be connected after the server is running.
+    Handles service setup and teardown with ConfidentialMind support and observability.
     """
     state = {"connected": False}
 
@@ -390,104 +416,220 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         # Initialize environment
         load_environment()
 
-        # Initialize ConnectionManager (this will handle all connector registration and URL polling)
+        # Initialize ConnectionManager with observability
         try:
-            # Run with timeout protection
             await asyncio.wait_for(ConnectionManager.initialize(), timeout=5.0)
             logger.info("Connection manager initialized")
+
+            # Log initialization success
+            structlog_logger.info(
+                "Service initialization completed",
+                event_type="service.init.complete",
+                data={"service": settings.name, "timeout_ms": 5000}
+            )
         except asyncio.TimeoutError:
-            logger.warning(
-                "ConnectionManager initialization timed out, continuing without connection"
+            structlog_logger.warning(
+                "Connection manager initialization timed out",
+                event_type="service.init.timeout",
+                data={"timeout_ms": 5000}
             )
         except Exception as e:
-            logger.error(f"Error initializing connection manager: {e}")
+            structlog_logger.error(
+                "Connection manager initialization failed",
+                event_type="service.init.error",
+                error=str(e),
+                error_type=type(e).__name__
+            )
 
-        # Check connection state
+        # Check connection state with observability
         state["connected"] = ConnectionManager.is_connected()
         if state["connected"]:
-            logger.info("Service connection established")
+            structlog_logger.info(
+                "Service connection established",
+                event_type="service.connection.established",
+                data={"service": settings.name}
+            )
         else:
-            logger.info("No service connection available yet. Server will start anyway.")
+            structlog_logger.info(
+                "Service starting without connection",
+                event_type="service.connection.deferred",
+                data={"service": settings.name, "reason": "connection_unavailable"}
+            )
 
-        # Quickly yield control back to FastMCP
         yield state
 
     except (asyncio.CancelledError, KeyboardInterrupt) as e:
-        logger.info(f"Server startup interrupted: {type(e).__name__}")
+        structlog_logger.info(
+            "Service shutdown initiated",
+            event_type="service.shutdown.start",
+            data={"reason": type(e).__name__}
+        )
         raise
     finally:
-        logger.info("Shutting down server, closing connections")
         try:
             await ConnectionManager.close()
-            logger.info("Connections closed")
+            structlog_logger.info(
+                "Service shutdown completed",
+                event_type="service.shutdown.complete",
+                data={"service": settings.name}
+            )
         except Exception as e:
-            logger.error(f"Error closing connections: {e}")
+            structlog_logger.error(
+                "Service shutdown error",
+                event_type="service.shutdown.error",
+                error=str(e),
+                error_type=type(e).__name__
+            )
 
 
-# Instantiate the FastMCP server with the lifespan manager
+# Instantiate the FastMCP server
 mcp_server = FastMCP(
     name="My FastMCP Server",
-    instructions="Provides access to my service.",
+    instructions="Provides access to my service with full observability.",
     lifespan=lifespan,
 )
 
 @mcp_server.resource("my-service://info")
 async def get_service_info(ctx: Context) -> Dict[str, Any]:
     """
-    Retrieves information about the service.
+    Retrieves information about the service with tracing support.
     """
+    # Initialize trace context from headers
+    trace_headers = extract_trace_headers(ctx)
+    if trace_headers.get("trace_id"):
+        TraceContext.initialize(
+            session_id=trace_headers.get("session_id", "unknown"),
+            trace_id=trace_headers.get("trace_id"),
+            origin_service=trace_headers.get("origin_service", "unknown"),
+            parent_span_id=trace_headers.get("span_id"),
+        )
+
     connected = ctx.request_context.lifespan_context.get("connected", False)
+
+    # Log resource access
+    structlog_logger.info(
+        "Service info requested",
+        event_type="resource.info.requested",
+        data={"connected": connected, "service": settings.name}
+    )
+
     if not connected:
-        logger.error("Service not connected.")
-        return {"status": "unavailable", "message": "Service connection is not available yet."}
+        structlog_logger.warning(
+            "Service info request - service not connected",
+            event_type="resource.info.unavailable",
+            data={"reason": "service_not_connected"}
+        )
+        return {
+            "status": "unavailable",
+            "message": "Service connection is not available yet."
+        }
 
     try:
-        # Return service information
-        return {
+        result = {
             "status": "available",
             "service_name": settings.name,
             "service_description": settings.description,
             "url": ConnectionManager.get_current_url()
         }
+
+        structlog_logger.info(
+            "Service info provided successfully",
+            event_type="resource.info.success",
+            data={"status": result["status"]}
+        )
+
+        return result
     except Exception as e:
-        logger.error(f"Failed to get service info: {e}")
+        structlog_logger.error(
+            "Service info request failed",
+            event_type="resource.info.error",
+            error=str(e),
+            error_type=type(e).__name__
+        )
         return {"status": "error", "message": f"Could not retrieve service info: {e}"}
 
 @mcp_server.tool()
 async def my_tool(input_param: str, ctx: Context) -> str:
     """
-    Example tool that performs an action with the service.
-
-    Args:
-        input_param: An input parameter for the tool.
-        ctx: The MCP context (automatically injected).
-
-    Returns:
-        A result string.
+    Example tool with comprehensive observability.
     """
+    # Initialize trace context
+    trace_headers = extract_trace_headers(ctx)
+    if trace_headers.get("trace_id"):
+        TraceContext.initialize(
+            session_id=trace_headers.get("session_id", "unknown"),
+            trace_id=trace_headers.get("trace_id"),
+            origin_service=trace_headers.get("origin_service", "unknown"),
+            parent_span_id=trace_headers.get("span_id"),
+        )
+
+    # Log tool execution start
+    start_time = time.time()
+    structlog_logger.info(
+        "Tool execution started",
+        event_type="tool.execution.start",
+        data={
+            "tool_name": "my_tool",
+            "input_length": len(input_param),
+            "input_preview": input_param[:50] + "..." if len(input_param) > 50 else input_param
+        }
+    )
+
     connected = ctx.request_context.lifespan_context.get("connected", False)
     if not connected:
-        logger.error("Service not connected for my_tool.")
+        structlog_logger.error(
+            "Tool execution failed - service not connected",
+            event_type="tool.execution.error",
+            error="Service connection not available",
+            data={"tool_name": "my_tool"}
+        )
         raise RuntimeError("Service connection is not available yet. Please try again later.")
 
     try:
-        # Implement your tool functionality here
+        # Tool implementation
         await ctx.info(f"Processing input: {input_param}")
         result = f"Processed: {input_param}"
+
+        # Log successful completion
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.info(
+            "Tool execution completed successfully",
+            event_type="tool.execution.complete",
+            duration_ms=duration_ms,
+            success=True,
+            data={
+                "tool_name": "my_tool",
+                "result_length": len(result)
+            }
+        )
+
         return result
     except Exception as e:
-        logger.error(f"Failed to execute tool: {e}")
+        # Log tool execution error
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "Tool execution failed",
+            event_type="tool.execution.complete",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type=type(e).__name__,
+            data={"tool_name": "my_tool"}
+        )
         raise RuntimeError(f"Could not execute tool: {e}")
 
 @mcp_server.custom_route("/health", methods=["GET"])
 async def http_health_endpoint(request: Request) -> JSONResponse:
     """
-    HTTP health endpoint for Kubernetes liveness and readiness probes.
-
-    This endpoint always returns a 200 status code when the server is running,
-    regardless of connection status, allowing the pod to stay alive
-    while waiting for the service to be configured.
+    HTTP health endpoint with observability logging.
     """
+    # Log health check request
+    structlog_logger.info(
+        "Health check requested",
+        event_type="health.check.requested",
+        data={"endpoint": "/health"}
+    )
+
     # Create health status response
     health_status = {
         "status": "healthy",
@@ -498,7 +640,17 @@ async def http_health_endpoint(request: Request) -> JSONResponse:
         "connector_id": settings.connector_id,
     }
 
-    # Always return a 200 status code to keep the pod alive
+    # Log health status
+    structlog_logger.info(
+        "Health check completed",
+        event_type="health.check.complete",
+        data={
+            "status": health_status["status"],
+            "service_connected": health_status["service_connected"],
+            "server_mode": health_status["server_mode"]
+        }
+    )
+
     return JSONResponse(content=health_status)
 ```
 
@@ -676,6 +828,259 @@ if __name__ == "__main__":
                 logger.error(f"Error during cleanup: {e}")
 ```
 
+## Observability Integration
+
+The ConfidentialMind MCP stack includes comprehensive observability features with structured JSON logging and distributed tracing. This section shows how to integrate these features into your MCP server.
+
+### Adding Observability to Your Server
+
+1. **Import Observability Components**
+
+   Add these imports to your server module:
+
+   ```python
+   from src.shared.logging import get_logger, TraceContext
+   import time  # For duration tracking
+
+   # Replace standard logger with structured logger
+   logger = logging.getLogger(__name__)  # Standard logging
+   structlog_logger = get_logger("myservice.mcp")  # Structured logging
+   ```
+
+2. **Extract Trace Context**
+
+   Create a helper function to extract trace headers from FastMCP context:
+
+   ```python
+   def extract_trace_headers(ctx: Context) -> Dict[str, str]:
+       """Extract trace headers from FastMCP context for distributed tracing."""
+       trace_headers = {}
+       if hasattr(ctx, "request_context") and hasattr(ctx.request_context, "headers"):
+           headers = ctx.request_context.headers
+           trace_headers = {
+               "trace_id": headers.get("X-Trace-ID"),
+               "span_id": headers.get("X-Span-ID"),
+               "parent_span_id": headers.get("X-Parent-Span-ID"),
+               "session_id": headers.get("X-Session-ID"),
+               "origin_service": headers.get("X-Origin-Service"),
+           }
+       return trace_headers
+   ```
+
+3. **Initialize Trace Context in Tools**
+
+   At the beginning of each tool function:
+
+   ```python
+   @mcp_server.tool()
+   async def my_tool(input_param: str, ctx: Context) -> str:
+       # Initialize trace context from headers
+       trace_headers = extract_trace_headers(ctx)
+       if trace_headers.get("trace_id"):
+           TraceContext.initialize(
+               session_id=trace_headers.get("session_id", "unknown"),
+               trace_id=trace_headers.get("trace_id"),
+               origin_service=trace_headers.get("origin_service", "unknown"),
+               parent_span_id=trace_headers.get("span_id"),
+           )
+
+       # Rest of tool implementation...
+   ```
+
+4. **Add Structured Logging Events**
+
+   Replace simple log statements with structured events:
+
+   ```python
+   # Before
+   logger.info("Tool execution started")
+
+   # After
+   structlog_logger.info(
+       "Tool execution started",
+       event_type="tool.execution.start",
+       data={
+           "tool_name": "my_tool",
+           "input_length": len(input_param),
+           "input_preview": input_param[:50] + "..." if len(input_param) > 50 else input_param
+       }
+   )
+   ```
+
+5. **Track Operation Duration**
+
+   Add timing to operations:
+
+   ```python
+   @mcp_server.tool()
+   async def my_tool(input_param: str, ctx: Context) -> str:
+       start_time = time.time()
+
+       try:
+           # Tool implementation
+           result = await perform_operation(input_param)
+
+           # Log success
+           duration_ms = (time.time() - start_time) * 1000
+           structlog_logger.info(
+               "Tool execution completed successfully",
+               event_type="tool.execution.complete",
+               duration_ms=duration_ms,
+               success=True,
+               data={"tool_name": "my_tool", "result_length": len(result)}
+           )
+
+           return result
+
+       except Exception as e:
+           # Log error
+           duration_ms = (time.time() - start_time) * 1000
+           structlog_logger.error(
+               "Tool execution failed",
+               event_type="tool.execution.complete",
+               duration_ms=duration_ms,
+               success=False,
+               error=str(e),
+               error_type=type(e).__name__,
+               data={"tool_name": "my_tool"}
+           )
+           raise
+   ```
+
+### Event Type Conventions
+
+Use consistent event type patterns:
+
+- **Lifecycle Events**: `service.init.start`, `service.init.complete`, `service.shutdown.start`
+- **Tool Events**: `tool.execution.start`, `tool.execution.complete`, `tool.validation.error`
+- **Resource Events**: `resource.access.start`, `resource.fetch.complete`, `resource.cache.hit`
+- **Connection Events**: `connection.established`, `connection.lost`, `connection.retry`
+- **Health Events**: `health.check.requested`, `health.check.complete`
+
+### Standard Data Fields
+
+Include consistent data fields in your logs:
+
+```python
+# Tool execution
+data={
+    "tool_name": "execute_sql",
+    "input_preview": "SELECT * FROM users...",
+    "duration_ms": 150.5,
+    "result_count": 42
+}
+
+# Resource access
+data={
+    "resource_uri": "postgres://schemas",
+    "resource_type": "database_schema",
+    "cache_hit": False
+}
+
+# Error context
+data={
+    "operation": "database_query",
+    "retry_count": 3,
+    "error_category": "timeout"
+}
+```
+
+### Complete Example Integration
+
+Here's a complete example showing observability integration in a tool:
+
+```python
+@mcp_server.tool()
+async def execute_sql(sql_query: str, ctx: Context) -> list[dict]:
+    """Execute SQL with full observability integration."""
+
+    # Initialize trace context
+    trace_headers = extract_trace_headers(ctx)
+    if trace_headers.get("trace_id"):
+        TraceContext.initialize(
+            session_id=trace_headers.get("session_id", "unknown"),
+            trace_id=trace_headers.get("trace_id"),
+            origin_service=trace_headers.get("origin_service", "unknown"),
+        )
+
+    # Log operation start
+    start_time = time.time()
+    structlog_logger.info(
+        "SQL query execution started",
+        event_type="sql.query.start",
+        data={
+            "query_preview": sql_query[:100] + "..." if len(sql_query) > 100 else sql_query,
+            "query_length": len(sql_query),
+        }
+    )
+
+    try:
+        # Validate connection
+        if not is_connected():
+            structlog_logger.warning(
+                "SQL query failed - database not connected",
+                event_type="sql.query.error",
+                data={"error": "database_not_connected"}
+            )
+            raise RuntimeError("Database connection not available")
+
+        # Execute query
+        results = await execute_query(sql_query)
+
+        # Log successful completion
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.info(
+            "SQL query completed successfully",
+            event_type="sql.query.complete",
+            duration_ms=duration_ms,
+            success=True,
+            data={
+                "row_count": len(results),
+                "query_preview": sql_query[:100] + "..." if len(sql_query) > 100 else sql_query,
+            }
+        )
+
+        return results
+
+    except ValidationError as e:
+        # Log validation error
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.warning(
+            "SQL query validation failed",
+            event_type="sql.query.validation_error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type="ValidationError",
+            data={"query_preview": sql_query[:100]}
+        )
+        raise
+
+    except Exception as e:
+        # Log unexpected error
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "SQL query execution failed",
+            event_type="sql.query.error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type=type(e).__name__,
+            data={"query_preview": sql_query[:100]}
+        )
+        raise
+```
+
+This observability integration provides:
+
+- Distributed tracing correlation across service calls
+- Structured JSON logs compatible with OpenTelemetry Collector
+- Performance metrics and duration tracking
+- Comprehensive error logging with context
+- Consistent event taxonomy for log analysis
+
+For complete observability documentation, see [guides/observability.md](guides/observability.md).
+
 ## Local vs. Stack Deployment
 
 Your server now supports two deployment modes:
@@ -833,11 +1238,12 @@ config_manager.init_manager(
 
 ## Full Example: Database MCP Server
 
-Here's a simplified example of a full database MCP server implementation:
+Here's a simplified example of a full database MCP server implementation with observability:
 
 ```python
 # server.py
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, List
 
@@ -845,6 +1251,8 @@ from confidentialmind_core.config_manager import load_environment
 from fastmcp import Context, FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+from src.shared.logging import get_logger, TraceContext
 
 class DBConnectionManager:
     # Database connection management code here...
@@ -858,6 +1266,23 @@ class DBConnectionManager:
         # Execute a database query
         pass
 
+# Create structured logger
+structlog_logger = get_logger("database.mcp")
+
+def extract_trace_headers(ctx: Context) -> Dict[str, str]:
+    """Extract trace headers from FastMCP context."""
+    trace_headers = {}
+    if hasattr(ctx, "request_context") and hasattr(ctx.request_context, "headers"):
+        headers = ctx.request_context.headers
+        trace_headers = {
+            "trace_id": headers.get("X-Trace-ID"),
+            "span_id": headers.get("X-Span-ID"),
+            "parent_span_id": headers.get("X-Parent-Span-ID"),
+            "session_id": headers.get("X-Session-ID"),
+            "origin_service": headers.get("X-Origin-Service"),
+        }
+    return trace_headers
+
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     state = {"db_connected": False}
@@ -865,6 +1290,13 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         # Initialize database connection
         await DBConnectionManager.initialize()
         state["db_connected"] = True
+
+        structlog_logger.info(
+            "Database MCP server initialized",
+            event_type="service.init.complete",
+            data={"service": "database-mcp"}
+        )
+
         yield state
     finally:
         # Clean up
@@ -873,43 +1305,150 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
 # Create the server
 db_server = FastMCP(
     name="Database MCP Server",
-    instructions="Provides read-only access to a database.",
+    instructions="Provides read-only access to a database with full observability.",
     lifespan=lifespan,
 )
 
 @db_server.resource("db://schemas")
 async def get_schemas(ctx: Context) -> Dict[str, List[Dict]]:
-    """Get database schemas."""
+    """Get database schemas with observability."""
+    # Initialize trace context
+    trace_headers = extract_trace_headers(ctx)
+    if trace_headers.get("trace_id"):
+        TraceContext.initialize(
+            session_id=trace_headers.get("session_id", "unknown"),
+            trace_id=trace_headers.get("trace_id"),
+            origin_service=trace_headers.get("origin_service", "unknown"),
+        )
+
+    # Log resource access
+    structlog_logger.info(
+        "Database schemas requested",
+        event_type="resource.schemas.requested",
+        data={"resource_uri": "db://schemas"}
+    )
+
     if not ctx.request_context.lifespan_context.get("db_connected"):
+        structlog_logger.error(
+            "Database schemas request failed - not connected",
+            event_type="resource.schemas.error",
+            error="Database not connected"
+        )
         raise RuntimeError("Database not connected")
 
-    # Return database schemas
-    return await DBConnectionManager.get_schemas()
+    try:
+        schemas = await DBConnectionManager.get_schemas()
+
+        structlog_logger.info(
+            "Database schemas retrieved successfully",
+            event_type="resource.schemas.success",
+            data={"schema_count": len(schemas)}
+        )
+
+        return schemas
+    except Exception as e:
+        structlog_logger.error(
+            "Failed to retrieve database schemas",
+            event_type="resource.schemas.error",
+            error=str(e),
+            error_type=type(e).__name__
+        )
+        raise
 
 @db_server.tool()
 async def execute_sql(query: str, ctx: Context) -> List[Dict]:
-    """Execute a read-only SQL query."""
+    """Execute a read-only SQL query with full observability."""
+    # Initialize trace context
+    trace_headers = extract_trace_headers(ctx)
+    if trace_headers.get("trace_id"):
+        TraceContext.initialize(
+            session_id=trace_headers.get("session_id", "unknown"),
+            trace_id=trace_headers.get("trace_id"),
+            origin_service=trace_headers.get("origin_service", "unknown"),
+        )
+
+    start_time = time.time()
+
+    # Log query start
+    structlog_logger.info(
+        "SQL query execution started",
+        event_type="sql.query.start",
+        data={
+            "query_preview": query[:100] + "..." if len(query) > 100 else query,
+            "query_length": len(query)
+        }
+    )
+
     if not ctx.request_context.lifespan_context.get("db_connected"):
+        structlog_logger.error(
+            "SQL query failed - database not connected",
+            event_type="sql.query.error",
+            error="Database not connected"
+        )
         raise RuntimeError("Database not connected")
 
-    # Execute the query and return results
-    return await DBConnectionManager.execute_query(query)
+    try:
+        # Execute the query and return results
+        results = await DBConnectionManager.execute_query(query)
+
+        # Log successful completion
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.info(
+            "SQL query completed successfully",
+            event_type="sql.query.complete",
+            duration_ms=duration_ms,
+            success=True,
+            data={
+                "row_count": len(results),
+                "query_preview": query[:100] + "..." if len(query) > 100 else query
+            }
+        )
+
+        return results
+
+    except Exception as e:
+        # Log error
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "SQL query execution failed",
+            event_type="sql.query.error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type=type(e).__name__,
+            data={"query_preview": query[:100]}
+        )
+        raise
 
 @db_server.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
-    """Health check endpoint."""
-    return JSONResponse({
+    """Health check endpoint with observability."""
+    structlog_logger.info(
+        "Health check requested",
+        event_type="health.check.requested",
+        data={"endpoint": "/health"}
+    )
+
+    health_status = {
         "status": "healthy",
         "database_connected": DBConnectionManager.is_connected()
-    })
+    }
+
+    structlog_logger.info(
+        "Health check completed",
+        event_type="health.check.complete",
+        data=health_status
+    )
+
+    return JSONResponse(health_status)
 
 # Run the server
 if __name__ == "__main__":
     db_server.run(transport="streamable-http", host="0.0.0.0", port=8080)
 ```
 
-This creates a complete FastMCP server that exposes database schemas as resources and an SQL execution tool, with proper health checks and ConfidentialMind integration.
+This creates a complete FastMCP server that exposes database schemas as resources and an SQL execution tool, with proper health checks, ConfidentialMind integration, and comprehensive observability including structured logging and distributed tracing.
 
 ---
 
-By following this guide, you've created a FastMCP server that works both locally and in the ConfidentialMind stack deployment, with proper connection management, error handling, and graceful operation.
+By following this guide, you've created a FastMCP server that works both locally and in the ConfidentialMind stack deployment, with proper connection management, error handling, graceful operation, and full observability integration that provides insights into every aspect of your server's operation.

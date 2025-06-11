@@ -1,6 +1,6 @@
 # Postgres MCP Server
 
-A FastMCP server designed to provide **read-only** access to a PostgreSQL database. It allows MCP clients (like LLMs or other applications) to inspect database schemas and execute safe `SELECT` queries.
+A FastMCP server designed to provide **read-only** access to a PostgreSQL database with comprehensive observability features. It allows MCP clients (like LLMs or other applications) to inspect database schemas and execute safe `SELECT` queries while providing structured JSON logging and distributed tracing.
 
 ## Features
 
@@ -13,6 +13,12 @@ A FastMCP server designed to provide **read-only** access to a PostgreSQL databa
   - Automatically discovers database connection details from the stack
   - Continues operating even when database is not initially available
   - Background polling for database URL changes in stack deployment
+- **Comprehensive Observability:**
+  - **Structured JSON Logging**: All operations logged in OpenTelemetry-compatible format
+  - **Distributed Tracing**: Request correlation across service boundaries
+  - **Performance Monitoring**: Query execution timing and metrics
+  - **Error Context**: Rich error logging with query context and stack traces
+  - **Health Monitoring**: Detailed health check logging and metrics
 - **Graceful Operation:** Can start without an initial database connection and connect later when available.
 
 ## Requirements
@@ -24,6 +30,7 @@ A FastMCP server designed to provide **read-only** access to a PostgreSQL databa
   - `asyncpg>=0.29.0`
   - `pydantic-settings>=2.0.0`
   - `confidentialmind_core` (for stack integration)
+  - `structlog>=25.3.0` (for observability)
 
 ## Configuration
 
@@ -40,6 +47,7 @@ Configure database connection details using **environment variables** or a `.env
 - `PG_USER`: Database username (default: `postgres`)
 - `PG_PASSWORD`: Database password (default: `postgres`)
 - `PG_DATABASE`: Name of the database to connect to (default: `test_db`)
+- `DEBUG`: Set to "true" for human-readable logs (default: JSON format)
 
 **Optional:**
 
@@ -53,6 +61,7 @@ PG_PORT=5432
 PG_USER=postgres
 PG_PASSWORD=your_secure_password
 PG_DATABASE=mydatabase
+DEBUG=true
 ```
 
 ### 2. Stack Deployment Mode
@@ -63,6 +72,7 @@ In stack deployment mode, the server automatically:
 2. Discovers database connection URL from the stack
 3. Continuously polls for URL changes in the background
 4. Attempts to connect when database becomes available
+5. Outputs structured JSON logs for OpenTelemetry Collector
 
 This enables seamless operation in container orchestration environments where the database might be ready after the server starts.
 
@@ -93,7 +103,82 @@ A health check endpoint is available at `http://localhost:8080/health`.
 ### Important Endpoints
 
 - `/mcp` - The main MCP endpoint for Streamable HTTP communication
-- `/health` - Health check endpoint that returns server status
+- `/health` - Health check endpoint that returns server status with observability metrics
+
+## Observability Features
+
+The server provides comprehensive observability through structured logging and distributed tracing:
+
+### Structured JSON Logging
+
+All operations are logged in OpenTelemetry-compatible JSON format:
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:45.123Z",
+  "level": "info",
+  "logger": "postgres.mcp",
+  "event": "SQL query completed successfully",
+  "event_type": "postgres.query.complete",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440000",
+  "span_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  "session_id": "user-session-123",
+  "duration_ms": 150.5,
+  "success": true,
+  "data": {
+    "row_count": 42,
+    "query_preview": "SELECT * FROM users WHERE...",
+    "tool_name": "execute_sql"
+  }
+}
+```
+
+### Event Types
+
+The server emits events with consistent taxonomy:
+
+- `postgres.query.start` - SQL query execution initiated
+- `postgres.query.complete` - SQL query completed (success/failure)
+- `postgres.query.validation_error` - Query failed validation
+- `postgres.query.error` - Query execution error
+- `resource.schemas.requested` - Schema resource accessed
+- `health.check.requested` - Health check performed
+- `service.init.complete` - Server initialization completed
+
+### Distributed Tracing
+
+Request traces flow from the agent through the MCP server:
+
+- Automatic trace context extraction from MCP requests
+- Parent-child span relationships maintained
+- Trace correlation across database operations
+- Performance timing for all database interactions
+
+### Debug vs Production Logging
+
+**Development Mode** (`DEBUG=true`):
+
+```bash
+2024-01-15 10:30:45 [info] SQL query completed successfully
+├── trace_id: 550e8400-e29b-41d4-a716-446655440000
+├── duration_ms: 150.5
+└── data: {"row_count": 42, "query_preview": "SELECT * FROM users..."}
+```
+
+**Production Mode** (`DEBUG=false`):
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:45.123Z",
+  "level": "info",
+  "event": "SQL query completed successfully",
+  "event_type": "postgres.query.complete",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440000",
+  "duration_ms": 150.5,
+  "success": true,
+  "data": { "row_count": 42 }
+}
+```
 
 ## Testing
 
@@ -130,13 +215,14 @@ This server is designed only for **read-only** access to databases. The security
 
 ## Integration with FastMCP Agent
 
-The Postgres MCP server works seamlessly with the FastMCP agent:
+The Postgres MCP server works seamlessly with the FastMCP agent and provides full observability integration:
 
 1. Start the Postgres MCP server
 2. Configure the agent to connect to the server:
    - For CLI mode: Specify the path to the server in the config file
    - For API mode: Specify the server URL in the config file
 3. The agent will discover available tools and resources
+4. All operations are traced end-to-end with correlation IDs
 
 Example `config.json` for the agent in API mode:
 
@@ -148,6 +234,66 @@ Example `config.json` for the agent in API mode:
 }
 ```
 
+## Monitoring and Troubleshooting
+
+### Health Check Endpoint
+
+The `/health` endpoint provides detailed status information:
+
+```json
+{
+  "status": "healthy",
+  "service": "postgres-mcp-server",
+  "database_connected": true,
+  "database_error": null,
+  "server_mode": "stack_deployment",
+  "server_time": "2024-01-15T10:30:45.123Z",
+  "connector_id": "DATABASE"
+}
+```
+
+### Log Analysis
+
+Query performance monitoring:
+
+```bash
+# Filter query performance logs
+cat logs/postgres-mcp.log | jq 'select(.event_type == "postgres.query.complete") | {duration_ms, row_count, success}'
+
+# Monitor query errors
+cat logs/postgres-mcp.log | jq 'select(.event_type == "postgres.query.error") | {error, error_type, data}'
+```
+
+### OpenTelemetry Integration
+
+The structured logs are designed for OpenTelemetry Collector ingestion:
+
+```yaml
+# otel-collector.yml
+receivers:
+  filelog:
+    include: ["/var/log/postgres-mcp/*.log"]
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.timestamp
+          layout: "2006-01-02T15:04:05.000Z"
+
+processors:
+  batch:
+
+exporters:
+  jaeger:
+    endpoint: http://jaeger:14250
+
+service:
+  pipelines:
+    logs:
+      receivers: [filelog]
+      processors: [batch]
+      exporters: [jaeger]
+```
+
 ## Customization
 
 To modify server settings:
@@ -156,3 +302,19 @@ To modify server settings:
 - Add additional tools by extending the `server.py` file with new `@mcp_server.tool()` decorated functions
 - Enhance schema resources by adding more resource endpoints with `@mcp_server.resource()`
 - Customize database connection settings through environment variables or `.env` file
+- Add custom observability events by using the structured logger:
+
+```python
+from src.shared.logging import get_logger
+
+structlog_logger = get_logger("postgres.mcp")
+
+# Custom event logging
+structlog_logger.info(
+    "Custom operation completed",
+    event_type="postgres.custom.complete",
+    data={"custom_field": "value"}
+)
+```
+
+For complete observability documentation and best practices, see [guides/observability.md](../../guides/observability.md).
