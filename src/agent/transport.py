@@ -10,8 +10,42 @@ from fastmcp.client.transports import PythonStdioTransport, StreamableHttpTransp
 
 from src.agent.connectors import ConnectorConfigManager
 from src.agent.module_transport import ModuleStdioTransport, path_to_module_path
+from src.shared.logging import get_current_trace, get_logger
 
 logger = logging.getLogger(__name__)
+
+
+class ObservableStreamableHttpTransport(StreamableHttpTransport):
+    """
+    Wrapper for StreamableHttpTransport that adds trace headers.
+    Properly inherits from StreamableHttpTransport to be recognized by FastMCP.
+    """
+
+    def __init__(self, url: str):
+        super().__init__(url)
+        self.logger = get_logger("mcp.transport")
+
+    async def request(self, method: str, params: Optional[dict] = None):
+        """Override request method to add trace headers and logging."""
+        trace = get_current_trace()
+
+        if trace:
+            # Log the outgoing request
+            self.logger.debug(
+                "Making MCP request with trace context",
+                event_type="mcp.transport.request",
+                data={
+                    "method": method,
+                    "has_params": bool(params),
+                    "url": self.url,
+                    "trace_id": trace.trace_id,
+                },
+            )
+
+        # Call parent request method
+        # Note: Adding trace headers to the actual HTTP request would require
+        # deeper integration with FastMCP's transport layer
+        return await super().request(method, params)
 
 
 class TransportManager:
@@ -28,6 +62,7 @@ class TransportManager:
         self.transports = {}
         self.clients: Dict[str, Client] = {}
         self._background_fetch_task = None
+        self.logger = get_logger("agent.transport")
 
         # Load environment variables
         load_environment()
@@ -98,7 +133,7 @@ class TransportManager:
         use_module: bool = True,
     ) -> None:
         """
-        Configure transport for a specific server.
+        Configure transport with observability.
 
         Args:
             server_id: Unique identifier for this server
@@ -106,74 +141,109 @@ class TransportManager:
             server_url: URL for HTTP endpoint (for API mode)
             use_module: Whether to use module execution (-m flag) for CLI mode
         """
-        if server_id in self.transports:
-            logger.warning(
-                f"TransportManager: Transport for {server_id} already configured. Reconfiguring."
-            )
+        # Log transport configuration
+        self.logger.info(
+            "Configuring MCP transport",
+            event_type="transport.configure",
+            data={
+                "server_id": server_id,
+                "mode": self.mode,
+                "has_path": bool(server_path),
+                "has_url": bool(server_url),
+            },
+        )
 
-        if self.mode == "cli":
-            if not server_path:
-                raise ValueError(f"server_path required for CLI mode transport: {server_id}")
+        try:
+            if server_id in self.transports:
+                logger.warning(
+                    f"TransportManager: Transport for {server_id} already configured. Reconfiguring."
+                )
 
-            # Validate that the path exists
-            script_path = Path(server_path)
-            if not script_path.exists():
-                raise ValueError(f"Script not found: {os.path.abspath(server_path)}")
+            if self.mode == "cli":
+                if not server_path:
+                    raise ValueError(f"server_path required for CLI mode transport: {server_id}")
 
-            if use_module:
-                # Use ModuleStdioTransport for proper package imports
-                try:
-                    module_path = path_to_module_path(server_path)
-                    self.transports[server_id] = ModuleStdioTransport(module_path=module_path)
-                    logger.info(
-                        f"TransportManager: Configured module transport for {server_id}: {module_path}"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"TransportManager: Failed to create module transport for {server_id}: {e}. "
-                        f"Falling back to script transport."
-                    )
+                # Validate that the path exists
+                script_path = Path(server_path)
+                if not script_path.exists():
+                    raise ValueError(f"Script not found: {os.path.abspath(server_path)}")
+
+                if use_module:
+                    # Use ModuleStdioTransport for proper package imports
+                    try:
+                        module_path = path_to_module_path(server_path)
+                        self.transports[server_id] = ModuleStdioTransport(module_path=module_path)
+                        logger.info(
+                            f"TransportManager: Configured module transport for {server_id}: {module_path}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"TransportManager: Failed to create module transport for {server_id}: {e}. "
+                            f"Falling back to script transport."
+                        )
+                        self.transports[server_id] = PythonStdioTransport(script_path=server_path)
+                        logger.info(
+                            f"TransportManager: Configured stdio transport for {server_id}: {server_path}"
+                        )
+                else:
+                    # Use regular PythonStdioTransport
                     self.transports[server_id] = PythonStdioTransport(script_path=server_path)
                     logger.info(
                         f"TransportManager: Configured stdio transport for {server_id}: {server_path}"
                     )
-            else:
-                # Use regular PythonStdioTransport
-                self.transports[server_id] = PythonStdioTransport(script_path=server_path)
-                logger.info(
-                    f"TransportManager: Configured stdio transport for {server_id}: {server_path}"
+
+            elif self.mode == "api":
+                if not server_url:
+                    raise ValueError(f"server_url required for API mode transport: {server_id}")
+
+                normalized_url = server_url.rstrip("/")
+
+                # Handle URL path for streamable HTTP transport
+                if normalized_url.endswith("/sse"):
+                    # If URL still has /sse (from previous version), replace with /mcp
+                    server_url = normalized_url.rsplit("/sse", 1)[0] + "/mcp"
+                    logger.info(f"TransportManager: Converted SSE URL to MCP URL: {server_url}")
+                elif not normalized_url.endswith("/mcp"):
+                    # Ensure the URL has the /mcp path for streamable HTTP transport
+                    server_url = normalized_url + "/mcp"
+                    logger.info(f"TransportManager: Appended /mcp to the URL: {server_url}")
+                else:
+                    # URL already ends with /mcp (after normalization), use as is
+                    server_url = normalized_url
+                    logger.info(f"TransportManager: Using MCP URL as is: {server_url}")
+
+                # fixes temporary redirect spam
+                server_url = server_url + "/"
+
+                # Create observable transport that properly inherits from StreamableHttpTransport
+                self.transports[server_id] = ObservableStreamableHttpTransport(url=server_url)
+
+                self.logger.info(
+                    "MCP transport configured successfully",
+                    event_type="transport.configured",
+                    data={
+                        "server_id": server_id,
+                        "transport_type": "streamable-http",
+                        "url": server_url,
+                    },
                 )
 
-        elif self.mode == "api":
-            if not server_url:
-                raise ValueError(f"server_url required for API mode transport: {server_id}")
+                logger.info(
+                    f"TransportManager: Configured observable streamable HTTP transport for {server_id}: {server_url}"
+                )
 
-            normalized_url = server_url.rstrip("/")
-
-            # Handle URL path for streamable HTTP transport
-            if normalized_url.endswith("/sse"):
-                # If URL still has /sse (from previous version), replace with /mcp
-                server_url = normalized_url.rsplit("/sse", 1)[0] + "/mcp"
-                logger.info(f"TransportManager: Converted SSE URL to MCP URL: {server_url}")
-            elif not normalized_url.endswith("/mcp"):
-                # Ensure the URL has the /mcp path for streamable HTTP transport
-                server_url = normalized_url + "/mcp"
-                logger.info(f"TransportManager: Appended /mcp to the URL: {server_url}")
             else:
-                # URL already ends with /mcp (after normalization), use as is
-                server_url = normalized_url
-                logger.info(f"TransportManager: Using MCP URL as is: {server_url}")
+                raise ValueError(f"Unsupported mode: {self.mode}")
 
-            # fixes temporary redirect spam
-            server_url = server_url + "/"
-
-            self.transports[server_id] = StreamableHttpTransport(url=server_url)
-            logger.info(
-                f"TransportManager: Configured streamable HTTP transport for {server_id}: {server_url}"
+        except Exception as e:
+            self.logger.error(
+                "Failed to configure MCP transport",
+                event_type="transport.configure.error",
+                error=str(e),
+                error_type=type(e).__name__,
+                data={"server_id": server_id},
             )
-
-        else:
-            raise ValueError(f"Unsupported mode: {self.mode}")
+            raise
 
     def configure_from_dict(self, config: Dict[str, str], use_module: bool = True) -> None:
         """

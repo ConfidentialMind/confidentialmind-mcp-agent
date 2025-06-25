@@ -1,14 +1,18 @@
 import asyncio
 import datetime
 import logging
+import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Dict
 
 from confidentialmind_core.config_manager import load_environment
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+from src.shared.logging.config import get_logger
+from src.shared.logging.trace_context import TraceContext
 
 from .connection_manager import ConnectionManager
 from .db import (
@@ -20,6 +24,22 @@ from .db import (
 from .settings import settings
 
 logger = logging.getLogger(__name__)
+structlog_logger = get_logger("postgres.mcp")
+
+
+def extract_trace_headers(ctx: Context) -> Dict[str, str]:
+    """Extract trace headers from FastMCP context."""
+    trace_headers = {}
+    if hasattr(ctx, "request_context") and hasattr(ctx.request_context, "headers"):
+        headers = ctx.request_context.headers
+        trace_headers = {
+            "trace_id": headers.get("X-Trace-ID"),
+            "span_id": headers.get("X-Span-ID"),
+            "parent_span_id": headers.get("X-Parent-Span-ID"),
+            "session_id": headers.get("X-Session-ID"),
+            "origin_service": headers.get("X-Origin-Service"),
+        }
+    return trace_headers
 
 
 @asynccontextmanager
@@ -89,12 +109,11 @@ mcp_server = FastMCP(
 
 
 @mcp_server.resource("postgres://schemas")
-async def get_schemas() -> dict[str, list[dict]]:
+async def get_schemas(ctx: Context) -> dict[str, list[dict]]:
     """
     Retrieves the schemas (table names, columns, types) for all tables
     accessible by the connected database user. Excludes system tables.
     """
-    # Use direct pool access instead of context
     pool = ConnectionManager.get_pool()
 
     if not pool:
@@ -112,7 +131,7 @@ async def get_schemas() -> dict[str, list[dict]]:
 
 
 @mcp_server.tool()
-async def execute_sql(sql_query: str) -> list[dict]:
+async def execute_sql(sql_query: str, ctx: Context) -> list[dict]:
     """
     Executes a read-only SQL query (must start with SELECT, WITH, or EXPLAIN
     and contain no modification keywords like INSERT, UPDATE, DELETE, CREATE, etc.)
@@ -121,29 +140,82 @@ async def execute_sql(sql_query: str) -> list[dict]:
 
     Args:
         sql_query: The read-only SQL query string to execute.
+        ctx: The MCP context (automatically injected).
 
     Returns:
         A list of dictionaries, where each dictionary represents a row
         with column names as keys.
     """
-    # Use direct pool access instead of context
+    trace_headers = extract_trace_headers(ctx)
+    if trace_headers.get("trace_id"):
+        TraceContext.initialize(
+            session_id=trace_headers.get("session_id", "unknown"),
+            trace_id=trace_headers.get("trace_id"),
+            origin_service=trace_headers.get("origin_service", "unknown"),
+        )
+
+    structlog_logger.info(
+        "Starting SQL query execution",
+        event_type="postgres.query.start",
+        data={
+            "query_preview": sql_query[:100] + "..." if len(sql_query) > 100 else sql_query,
+            "query_length": len(sql_query),
+        },
+    )
+
+    start_time = time.time()
+
     pool = ConnectionManager.get_pool()
 
     if not pool:
+        structlog_logger.warning(
+            "Database not connected",
+            event_type="postgres.query.error",
+            data={"error": "Database pool not available"},
+        )
         logger.error("Database pool not available for execute_sql.")
         raise RuntimeError("Database connection is not available yet. Please try again later.")
 
     client = DatabaseClient(pool)
     try:
         results = await client.execute_readonly_query(sql_query)
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.info(
+            "SQL query completed successfully",
+            event_type="postgres.query.complete",
+            duration_ms=duration_ms,
+            success=True,
+            data={
+                "row_count": len(results),
+                "query_preview": sql_query[:100] + "..." if len(sql_query) > 100 else sql_query,
+            },
+        )
         logger.info(f"Executed query successfully, returned {len(results)} rows.")
         return results
-    except DatabaseUnavailableError:
-        raise RuntimeError("Database connection is not available yet. Please try again later.")
     except QueryValidationError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.warning(
+            "SQL query validation failed",
+            event_type="postgres.query.validation_error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type="QueryValidationError",
+            data={"query_preview": sql_query[:100]},
+        )
         logger.warning(f"SQL query validation failed: {e}")
         raise ToolError(str(e))
     except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        structlog_logger.error(
+            "SQL query execution failed",
+            event_type="postgres.query.error",
+            duration_ms=duration_ms,
+            success=False,
+            error=str(e),
+            error_type=type(e).__name__,
+            data={"query_preview": sql_query[:100]},
+        )
         logger.error(f"Failed to execute SQL query: {e}")
         raise RuntimeError(f"Could not execute SQL query: {e}")
 

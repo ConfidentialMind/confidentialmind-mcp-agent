@@ -19,9 +19,11 @@ from src.agent.database import Database, DatabaseSettings
 from src.agent.llm import LLMConnector
 from src.agent.state import Message
 from src.agent.transport import TransportManager
+from src.shared.logging import TraceContext, get_logger, traced_async
 
 # Configure logging
 logger = logging.getLogger("fastmcp_agent.api")
+structlog_logger = get_logger("agent.api")
 
 load_environment()
 
@@ -303,13 +305,21 @@ def get_session_id(request: Request) -> str:
     return session_id
 
 
+@traced_async("agent.streaming.process", "agent.api")
 async def _stream_chat_completion(
     query: str, session_id: str, req: ChatCompletionRequest, components: AgentComponents
 ):
-    """Generate streaming chat completion response"""
+    """Generate streaming chat completion response with tracing."""
 
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_timestamp = int(datetime.now().timestamp())
+
+    # Log streaming start
+    structlog_logger.info(
+        "Starting streaming chat completion",
+        event_type="agent.streaming.start",
+        data={"completion_id": completion_id, "query_length": len(query), "session_id": session_id},
+    )
 
     try:
         # Create agent
@@ -335,13 +345,19 @@ async def _stream_chat_completion(
             yield f"data: {initial_chunk.model_dump_json()}\n\n"
 
             # Stream agent execution
+            chunk_count = 0
+            total_content_length = 0
+
             async for chunk_data in agent.run_streaming(query, session_id):
+                chunk_count += 1
+
                 if chunk_data["type"] == "workflow_status":
                     # Optionally send workflow status as metadata (commented out to reduce noise)
                     # This could be enabled via a request parameter if desired
                     pass
 
                 elif chunk_data["type"] == "response_chunk":
+                    total_content_length += len(chunk_data.get("content", ""))
                     # Send content chunk
                     content_chunk = ChatCompletionStreamChunk(
                         id=completion_id,
@@ -356,6 +372,17 @@ async def _stream_chat_completion(
                     yield f"data: {content_chunk.model_dump_json()}\n\n"
 
                 elif chunk_data["type"] == "response_complete":
+                    # Log streaming completion
+                    structlog_logger.info(
+                        "Streaming chat completion completed",
+                        event_type="agent.streaming.complete",
+                        success=True,
+                        data={
+                            "completion_id": completion_id,
+                            "chunk_count": chunk_count,
+                            "total_content_length": total_content_length,
+                        },
+                    )
                     # Send final chunk
                     final_chunk = ChatCompletionStreamChunk(
                         id=completion_id,
@@ -367,6 +394,12 @@ async def _stream_chat_completion(
                     break
 
                 elif chunk_data["type"] == "error":
+                    structlog_logger.error(
+                        "Streaming chat completion error",
+                        event_type="agent.streaming.error",
+                        error=chunk_data.get("error"),
+                        data={"completion_id": completion_id, "chunk_count": chunk_count},
+                    )
                     # Send error as content and then finish
                     error_chunk = ChatCompletionStreamChunk(
                         id=completion_id,
@@ -384,6 +417,14 @@ async def _stream_chat_completion(
 
     except Exception as e:
         logger.error(f"Error in streaming completion: {e}", exc_info=True)
+        structlog_logger.error(
+            "Streaming chat completion failed",
+            event_type="agent.streaming.complete",
+            success=False,
+            error=str(e),
+            error_type=type(e).__name__,
+            data={"completion_id": completion_id},
+        )
         # Send error as final chunk
         error_chunk = ChatCompletionStreamChunk(
             id=completion_id,
@@ -826,23 +867,76 @@ async def create_chat_completion(
     req: ChatCompletionRequest,
     components: AgentComponents = Depends(get_components),
 ):
-    """OpenAI-compatible chat completion endpoint with streaming support."""
+    """OpenAI-compatible chat completion endpoint with tracing."""
 
-    # Get session ID if provided
+    # Initialize trace context at request entry
     session_id = get_session_id(request)
+    api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
 
-    # Detect mode based on session ID presence
-    # If session_id is a UUID that wasn't in the request, it's auto-generated
-    has_explicit_session = False
-    if request.headers.get("X-Session-ID") or request.cookies.get("session_id"):
-        has_explicit_session = True
+    trace_info = TraceContext.initialize(
+        session_id=session_id, api_key=api_key, origin_service="agent-api"
+    )
 
-    if has_explicit_session:
-        # Stateful mode - use existing logic
-        return await _process_stateful_request(request, session_id, req, components)
-    else:
-        # Stateless mode - use conversation fingerprinting
-        return await _process_stateless_request(req, components)
+    # Log request start
+    structlog_logger.info(
+        "Processing chat completion request",
+        event_type="agent.request.start",
+        data={
+            "endpoint": "/v1/chat/completions",
+            "model": req.model,
+            "streaming": req.stream,
+            "message_count": len(req.messages),
+            "has_explicit_session": bool(
+                request.headers.get("X-Session-ID") or request.cookies.get("session_id")
+            ),
+        },
+    )
+
+    try:
+        # Detect mode based on session ID presence
+        # If session_id is a UUID that wasn't in the request, it's auto-generated
+        has_explicit_session = False
+        if request.headers.get("X-Session-ID") or request.cookies.get("session_id"):
+            has_explicit_session = True
+
+        if has_explicit_session:
+            # Stateful mode - use existing logic
+            result = await _process_stateful_request(request, session_id, req, components)
+        else:
+            # Stateless mode - use conversation fingerprinting
+            result = await _process_stateless_request(req, components)
+
+        # Log successful completion
+        structlog_logger.info(
+            "Chat completion request completed successfully",
+            event_type="agent.request.complete",
+            success=True,
+            data={
+                "endpoint": "/v1/chat/completions",
+                "response_type": "streaming" if req.stream else "non-streaming",
+            },
+        )
+
+        # Add trace ID to response headers if possible
+        if hasattr(result, "headers"):
+            result.headers["X-Trace-ID"] = trace_info.trace_id
+
+        return result
+
+    except Exception as e:
+        # Log error
+        structlog_logger.error(
+            "Chat completion request failed",
+            event_type="agent.request.complete",
+            success=False,
+            error=str(e),
+            error_type=type(e).__name__,
+            data={"endpoint": "/v1/chat/completions"},
+        )
+        raise
+    finally:
+        # Clear trace context
+        TraceContext.clear()
 
 
 @app.get("/health")
