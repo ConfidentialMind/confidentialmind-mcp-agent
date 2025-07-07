@@ -86,8 +86,8 @@ class TraceContext:
             TraceInfo object that was set in context
         """
         trace_info = TraceInfo(
-            trace_id=trace_id or str(uuid.uuid4()),
-            span_id=span_id or str(uuid.uuid4()),
+            trace_id=trace_id or str(uuid.uuid4().hex),
+            span_id=span_id or str(uuid.uuid4().hex[:16]),
             parent_span_id=parent_span_id,
             session_id=session_id,
             api_key_hash=hashlib.sha256(api_key.encode()).hexdigest()[:16] if api_key else "",
@@ -115,7 +115,7 @@ class TraceContext:
 
         trace_info = TraceInfo(
             trace_id=trace_id,
-            span_id=headers.get("X-Span-ID", str(uuid.uuid4())),
+            span_id=headers.get("X-Span-ID", str(uuid.uuid4().hex[:16])),
             parent_span_id=headers.get("X-Parent-Span-ID") or None,
             session_id=headers.get("X-Session-ID", "unknown"),
             api_key_hash=hashlib.sha256(api_key.encode()).hexdigest()[:16] if api_key else "",

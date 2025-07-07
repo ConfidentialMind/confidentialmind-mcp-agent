@@ -103,7 +103,7 @@ def traced_async(
 
             # Create child span for this operation
             trace = get_current_trace()
-            span_id = str(uuid.uuid4())
+            span_id = str(uuid.uuid4().hex[:16])
             parent_span_id = trace.span_id if trace else None
 
             # Extract function attributes
@@ -212,7 +212,7 @@ def traced(
 
             # Create child span for this operation
             trace = get_current_trace()
-            span_id = str(uuid.uuid4())
+            span_id = str(uuid.uuid4().hex[:16])
             parent_span_id = trace.span_id if trace else None
 
             # Extract function attributes
@@ -300,7 +300,7 @@ class log_operation:
         self.logger = get_logger(logger_name or "agent")
         self.data = data or {}
         self.start_time = None
-        self.span_id = str(uuid.uuid4())
+        self.span_id = str(uuid.uuid4().hex[:16])
         self.parent_span_id = None
         self.old_span = None
 
