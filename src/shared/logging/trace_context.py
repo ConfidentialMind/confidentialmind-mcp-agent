@@ -30,7 +30,7 @@ class TraceInfo:
         """Create a child span with this span as parent."""
         return TraceInfo(
             trace_id=self.trace_id,
-            span_id=str(uuid.uuid4()),
+            span_id=str(uuid.uuid4().hex[:16]),
             parent_span_id=self.span_id,
             session_id=self.session_id,
             api_key_hash=self.api_key_hash,
