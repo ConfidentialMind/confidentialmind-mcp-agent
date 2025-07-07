@@ -121,12 +121,12 @@ class BaseRAGClient:
     async def check_health(cls) -> bool:
         """Check API health."""
         try:
-            logger.info("Checking BaseRAG API health")
             result = await cls._make_request("GET", "/health")
             is_healthy = result.get("status") == "ok"
-            logger.info(
-                f"BaseRAG API health check result: {'healthy' if is_healthy else 'unhealthy'}"
-            )
+
+            if not is_healthy:
+                logger.error("BaseRAG API health check failed: status not ok")
+
             return is_healthy
         except Exception as e:
             logger.error(f"Health check failed: {e}")
