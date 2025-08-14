@@ -46,7 +46,7 @@ spec:
     - name: stack-branch
       value: dev
     - name: skip-deploy
-      value: "false"
+      value: "true"
     - name: dockerfile
       value: docker/agent.Dockerfile
     - name: build-args
