@@ -23,13 +23,12 @@ COPY src/ ./src/
 # Copy local SDK POC (includes our tracing module)
 COPY sdk/confidentialmind_core/ ./sdk/confidentialmind_core/
 
-# Install the local SDK first (in editable mode won't work in Docker, so regular install)
-RUN pip install ./sdk/confidentialmind_core/
+# Install Python dependencies first (except confidentialmind-core)
+# We'll install our local SDK version after
+RUN uv pip install --no-cache . 
 
-# Install Python dependencies into the virtual environment using uv
-# This installs the project defined in pyproject.toml and its dependencies
-# The --no-deps for confidentialmind-core prevents reinstalling from PyPI
-RUN uv pip install --no-cache . --no-deps confidentialmind-core
+# Now force reinstall our local SDK over the PyPI version
+RUN pip install --force-reinstall --no-deps ./sdk/confidentialmind_core/
 
 # --- Runtime Stage ---
 FROM python:3.10-slim
