@@ -20,9 +20,16 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY pyproject.toml .
 COPY src/ ./src/
 
+# Copy local SDK POC (includes our tracing module)
+COPY sdk/confidentialmind_core/ ./sdk/confidentialmind_core/
+
+# Install the local SDK first (in editable mode won't work in Docker, so regular install)
+RUN pip install ./sdk/confidentialmind_core/
+
 # Install Python dependencies into the virtual environment using uv
 # This installs the project defined in pyproject.toml and its dependencies
-RUN uv pip install --no-cache .
+# The --no-deps for confidentialmind-core prevents reinstalling from PyPI
+RUN uv pip install --no-cache . --no-deps confidentialmind-core
 
 # --- Runtime Stage ---
 FROM python:3.10-slim
