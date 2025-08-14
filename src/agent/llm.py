@@ -1,12 +1,7 @@
-import logging
 from typing import AsyncGenerator, Optional
 
 from confidentialmind_core.model_client import ConnectorNotConfiguredError, ModelClient
-from confidentialmind_core import get_current_trace
-
-from src.shared.logging.config import get_logger
-
-logger = logging.getLogger(__name__)
+from confidentialmind_core import get_current_trace, get_logger
 
 
 class LLMConnector:
@@ -36,7 +31,7 @@ class LLMConnector:
         # Use structlog logger
         self.logger = get_logger("agent.llm")
 
-        logger.info(f"LLMConnector: Initialized for config_id={config_id}")
+        self.logger.info(f"LLMConnector: Initialized for config_id={config_id}")
 
     async def initialize(self) -> bool:
         """
@@ -61,12 +56,12 @@ class LLMConnector:
             # Test if an LLM is currently configured
             try:
                 self._model_client.get_client()
-                logger.info(
+                self.logger.info(
                     f"LLMConnector: ModelClient initialized and LLM is configured "
                     f"for {self.config_id}"
                 )
             except ConnectorNotConfiguredError:
-                logger.info(
+                self.logger.info(
                     f"LLMConnector: ModelClient initialized but no LLM configured yet "
                     f"for {self.config_id}"
                 )
@@ -76,7 +71,7 @@ class LLMConnector:
             return True
 
         except Exception as e:
-            logger.error(f"LLMConnector: Error initializing ModelClient: {e}")
+            self.logger.error(f"LLMConnector: Error initializing ModelClient: {e}")
             return False
 
     def is_connected(self) -> bool:
@@ -136,14 +131,14 @@ class LLMConnector:
             return response.choices[0].message.content
 
         except ConnectorNotConfiguredError as e:
-            logger.debug(f"LLMConnector: No LLM configured: {e}")
+            self.logger.debug(f"LLMConnector: No LLM configured: {e}")
             return (
                 "I'm currently unable to generate a response as my language model "
                 "connection is unavailable. Please configure an LLM in the portal or "
                 "contact support."
             )
         except Exception as e:
-            logger.error(f"LLMConnector: Error generating text: {e}")
+            self.logger.error(f"LLMConnector: Error generating text: {e}")
             return (
                 "I'm currently unable to generate a response due to a technical issue "
                 "with my language model service. Please try again later."
@@ -194,14 +189,14 @@ class LLMConnector:
                         yield delta.content
 
         except ConnectorNotConfiguredError as e:
-            logger.debug(f"LLMConnector: No LLM configured: {e}")
+            self.logger.debug(f"LLMConnector: No LLM configured: {e}")
             yield (
                 "I'm currently unable to generate a response as my language model "
                 "connection is unavailable. Please configure an LLM in the portal or "
                 "contact support."
             )
         except Exception as e:
-            logger.error(f"LLMConnector: Error during streaming generation: {e}")
+            self.logger.error(f"LLMConnector: Error during streaming generation: {e}")
             yield (
                 "\n\nI'm currently unable to generate a response due to a technical "
                 "issue with my language model service. Please try again later."
@@ -209,7 +204,7 @@ class LLMConnector:
 
     async def close(self):
         """Close the connector and release resources"""
-        logger.info("LLMConnector: Closing ModelClient connection")
+        self.logger.info("LLMConnector: Closing ModelClient connection")
         # ModelClient handles its own cleanup internally
         self._model_client = None
-        logger.info("LLMConnector: Connection closed")
+        self.logger.info("LLMConnector: Connection closed")

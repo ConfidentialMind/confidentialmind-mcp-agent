@@ -35,6 +35,13 @@ from .tracing import (
     copy_context
 )
 
+# Logging exports
+from .logging import (
+    get_logger,
+    configure_structlog,
+    configure_python_logging
+)
+
 __all__ = [
     # Config management
     "load_environment",
@@ -63,5 +70,10 @@ __all__ = [
     "TraceContext",
     "TraceInfo",
     "get_current_trace",
-    "copy_context"
+    "copy_context",
+    
+    # Logging
+    "get_logger",
+    "configure_structlog",
+    "configure_python_logging"
 ]

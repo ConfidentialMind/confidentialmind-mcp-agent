@@ -3,15 +3,14 @@ from typing import Optional, AsyncGenerator, Any, Union
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from openai.types import CreateEmbeddingResponse
-import logging
-
 from .config_manager import get_api_parameters, ConfigManager
 from .usage_tracker import get_usage_tracker, UsageType, UsageRecord, extract_api_key_middle_part
 from .tracing import get_current_trace
+from .logging import get_logger
 from datetime import datetime
 
 # Set up logging
-logger = logging.getLogger(__name__)
+logger = get_logger("sdk.model_client")
 
 
 class ConnectorNotConfiguredError(Exception):
