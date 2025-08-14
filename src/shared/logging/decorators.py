@@ -10,7 +10,7 @@ import uuid
 from typing import Any, Callable, Dict, Optional, TypeVar
 
 from .config import get_logger
-from .trace_context import TraceContext, get_current_trace
+from confidentialmind_core import TraceContext, get_current_trace
 
 F = TypeVar("F", bound=Callable[..., Any])
 

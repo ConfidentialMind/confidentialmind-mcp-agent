@@ -19,7 +19,8 @@ from src.agent.database import Database, DatabaseSettings
 from src.agent.llm import LLMConnector
 from src.agent.state import Message
 from src.agent.transport import TransportManager
-from src.shared.logging import TraceContext, get_logger, traced_async
+from confidentialmind_core import TraceContext
+from src.shared.logging import get_logger, traced_async
 
 # Configure logging
 logger = logging.getLogger("fastmcp_agent.api")

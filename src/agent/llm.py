@@ -2,6 +2,7 @@ import logging
 from typing import AsyncGenerator, Optional
 
 from confidentialmind_core.model_client import ConnectorNotConfiguredError, ModelClient
+from confidentialmind_core import get_current_trace
 
 from src.shared.logging.config import get_logger
 
@@ -48,12 +49,13 @@ class LLMConnector:
             bool: True if initialization was successful (not necessarily connected)
         """
         try:
-            # Create ModelClient instance with automatic usage tracking
+            # Create ModelClient instance with automatic usage tracking and tracing
             # The ModelClient will handle configuration updates internally
             self._model_client = ModelClient(
                 config_id=self.config_id,
                 url_suffix="/v1/",
                 auto_track_usage=True,
+                auto_trace=True,  # Enable automatic trace context extraction
             )
 
             # Test if an LLM is currently configured
@@ -122,7 +124,7 @@ class LLMConnector:
 
         try:
             # Use ModelClient's completions_with_usage method
-            # This will automatically use the latest configuration
+            # This will automatically extract trace context and use the latest configuration
             response = await self._model_client.completions_with_usage(
                 messages=messages,
                 temperature=0.7,
@@ -174,7 +176,7 @@ class LLMConnector:
 
         try:
             # Use ModelClient's completions_with_usage method with streaming
-            # This will automatically use the latest configuration
+            # This will automatically extract trace context and use the latest configuration
             response_stream = await self._model_client.completions_with_usage(
                 messages=messages,
                 temperature=0.7,

@@ -15,7 +15,7 @@ load_dotenv(find_dotenv())
 
 def add_otel_context_processor(logger, method_name, event_dict):
     """Processor to add OpenTelemetry context to log entries."""
-    from .trace_context import get_current_trace
+    from confidentialmind_core import get_current_trace
 
     trace = get_current_trace()
     if trace:

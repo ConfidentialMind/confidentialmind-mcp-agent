@@ -5,7 +5,9 @@ Provides structured logging with OpenTelemetry-compatible JSON format.
 
 from .config import configure_python_logging, configure_structlog, get_logger
 from .decorators import log_operation, traced, traced_async
-from .trace_context import TraceContext, get_current_trace
+
+# Re-export tracing from SDK
+from confidentialmind_core import TraceContext, get_current_trace
 
 __all__ = [
     "configure_structlog",
