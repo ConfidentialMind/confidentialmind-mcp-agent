@@ -58,7 +58,7 @@ def configure_structlog():
     structlog.configure(
         processors=processors,
         context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
+        logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
 

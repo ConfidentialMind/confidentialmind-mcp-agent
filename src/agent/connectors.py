@@ -1,7 +1,7 @@
-import logging
 import os
 from typing import Dict, Optional, Tuple
 
+from confidentialmind_core import get_logger
 from confidentialmind_core.config_manager import (
     ArrayConnectorSchema,
     ConfigManager,
@@ -11,7 +11,7 @@ from confidentialmind_core.config_manager import (
 )
 from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+logger = get_logger("agent.connectors")
 
 
 class AgentConfig(BaseModel):

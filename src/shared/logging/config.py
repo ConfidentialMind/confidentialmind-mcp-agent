@@ -112,5 +112,6 @@ def configure_python_logging():
 
 
 # Initialize logging configuration when module is imported
-configure_structlog()
-configure_python_logging()
+# DISABLED: Using SDK logging instead to avoid conflicts
+# configure_structlog()
+# configure_python_logging()
