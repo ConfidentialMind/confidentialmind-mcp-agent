@@ -946,26 +946,25 @@ async def create_chat_completion(
     # Get session ID for conversation management (trace context handled by middleware)
     session_id = get_session_id(request)
 
-    try:
-        # Detect mode based on session ID presence
-        # If session_id is a UUID that wasn't in the request, it's auto-generated
-        has_explicit_session = False
-        if request.headers.get("X-Session-ID") or request.cookies.get("session_id"):
-            has_explicit_session = True
+    # Detect mode based on session ID presence
+    # If session_id is a UUID that wasn't in the request, it's auto-generated
+    has_explicit_session = False
+    if request.headers.get("X-Session-ID") or request.cookies.get("session_id"):
+        has_explicit_session = True
 
-        if has_explicit_session:
-            # Stateful mode - use existing logic
-            result = await _process_stateful_request(request, session_id, req, components)
-        else:
-            # Stateless mode - use conversation fingerprinting
-            result = await _process_stateless_request(req, components)
+    if has_explicit_session:
+        # Stateful mode - use existing logic
+        result = await _process_stateful_request(request, session_id, req, components)
+    else:
+        # Stateless mode - use conversation fingerprinting
+        result = await _process_stateless_request(req, components)
 
-        # Add trace ID to response headers if possible
-        current_trace = TraceContext.get()
-        if hasattr(result, "headers") and current_trace:
-            result.headers["X-Trace-ID"] = current_trace.trace_id
+    # Add trace ID to response headers if possible
+    current_trace = TraceContext.get()
+    if hasattr(result, "headers") and current_trace:
+        result.headers["X-Trace-ID"] = current_trace.trace_id
 
-        return result
+    return result
 
 
 @app.get("/health")
