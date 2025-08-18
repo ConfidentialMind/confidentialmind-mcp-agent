@@ -42,6 +42,13 @@ from .logging import (
     configure_python_logging
 )
 
+# Decorator exports
+from .decorators import (
+    traced,
+    traced_async,
+    log_operation
+)
+
 __all__ = [
     # Config management
     "load_environment",
@@ -75,5 +82,10 @@ __all__ = [
     # Logging
     "get_logger",
     "configure_structlog",
-    "configure_python_logging"
+    "configure_python_logging",
+    
+    # Decorators
+    "traced",
+    "traced_async", 
+    "log_operation"
 ]

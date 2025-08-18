@@ -7,7 +7,7 @@ import hashlib
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 # Thread-safe context variable for trace information
@@ -25,7 +25,7 @@ class TraceInfo:
     api_key_hash: str  # Keep for backward compatibility with logging
     api_key: Optional[str]  # Original API key for usage tracking
     origin_service: str
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def create_child_span(self) -> "TraceInfo":
         """Create a child span with this span as parent."""
@@ -56,8 +56,8 @@ class TraceInfo:
             "span_id": self.span_id,
             "parent_span_id": self.parent_span_id,
             "session_id": self.session_id,
-            "api_key": self.api_key_hash,  # Use hash for logging
-            "origin_service_id": self.origin_service,
+            "api_key_hash": self.api_key_hash,  # Match RAG naming
+            "origin_service": self.origin_service,
         }
 
 
