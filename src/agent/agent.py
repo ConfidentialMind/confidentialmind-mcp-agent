@@ -644,8 +644,8 @@ class Agent:
             state.thoughts.append(thought)
             if plan != "No plan provided.":
                 state.thoughts.append(f"Plan: {plan}")
-            self.logger.info("Agent Thought", thought=thought)
-            self.logger.info("Agent Plan", plan=plan)
+            self.logger.info("Agent Thought", data={"thought": thought})
+            self.logger.info("Agent Plan", data={"plan": plan})
 
             # Set planned actions
             state.planned_actions = parsed_response.get("actions", [])
