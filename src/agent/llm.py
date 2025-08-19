@@ -152,7 +152,7 @@ class LLMConnector:
                 event_type="llm.response",
                 data={
                     "response_length": len(generated_content) if generated_content else 0,
-                    "response_preview": (generated_content[:200] + "...") if generated_content and len(generated_content) > 200 else generated_content,
+                    "response_preview": (generated_content[:2000] + "...") if generated_content and len(generated_content) > 2000 else generated_content,
                     "usage_prompt_tokens": getattr(response.usage, 'prompt_tokens', 0) if hasattr(response, 'usage') else 0,
                     "usage_completion_tokens": getattr(response.usage, 'completion_tokens', 0) if hasattr(response, 'usage') else 0,
                     "usage_total_tokens": getattr(response.usage, 'total_tokens', 0) if hasattr(response, 'usage') else 0
@@ -247,7 +247,7 @@ class LLMConnector:
                 event_type="llm.streaming_response",
                 data={
                     "total_response_length": len(accumulated_content),
-                    "response_preview": (accumulated_content[:200] + "...") if len(accumulated_content) > 200 else accumulated_content,
+                    "response_preview": (accumulated_content[:2000] + "...") if len(accumulated_content) > 2000 else accumulated_content,
                     "chunks_received": chunk_count
                 }
             )
