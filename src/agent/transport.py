@@ -10,7 +10,7 @@ from fastmcp.client.transports import PythonStdioTransport, StreamableHttpTransp
 
 from src.agent.connectors import ConnectorConfigManager
 from src.agent.module_transport import ModuleStdioTransport, path_to_module_path
-from src.shared.logging import get_current_trace, get_logger
+from src.shared.logging import get_current_trace, get_logger, traced_async
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class ObservableStreamableHttpTransport(StreamableHttpTransport):
         super().__init__(url)
         self.logger = get_logger("mcp.transport")
 
+    @traced_async("mcp.request")
     async def request(self, method: str, params: Optional[dict] = None):
         """Override request method to add trace headers and logging."""
         trace = get_current_trace()

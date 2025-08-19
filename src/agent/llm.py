@@ -1,7 +1,7 @@
 from typing import AsyncGenerator, Optional
 
 from confidentialmind_core.model_client import ConnectorNotConfiguredError, ModelClient
-from confidentialmind_core import get_current_trace, get_logger
+from confidentialmind_core import get_current_trace, get_logger, traced_async
 
 
 class LLMConnector:
@@ -93,6 +93,7 @@ class LLMConnector:
         except Exception:
             return False
 
+    @traced_async("llm.generate")
     async def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
         Generate text from the LLM based on the prompt.
@@ -144,6 +145,7 @@ class LLMConnector:
                 "with my language model service. Please try again later."
             )
 
+    @traced_async("llm.generate_streaming")
     async def generate_streaming(
         self, prompt: str, system_prompt: Optional[str] = None
     ) -> AsyncGenerator[str, None]:

@@ -48,6 +48,7 @@ class Agent:
         self._has_tools = False
         self._db_connected = False
         self._llm_connected = False
+        self._initialized = False
 
         # Use structlog logger
         self.logger = get_logger("agent.core")
@@ -65,6 +66,9 @@ class Agent:
 
     async def initialize(self) -> bool:
         """Initialize agent components."""
+        if self._initialized:
+            return True
+            
         logger.info("Initializing agent...")
 
         # Check connection status
@@ -111,6 +115,7 @@ class Agent:
                 logger.error(f"Failed to connect to MCP server {server_id}: {e}")
                 # Continue with other servers
 
+        self._initialized = True
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -119,6 +124,7 @@ class Agent:
 
     # --- Streaming Support ---
 
+    @traced_async("agent.run_streaming")
     async def run_streaming(
         self, query: str, session_id: Optional[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
