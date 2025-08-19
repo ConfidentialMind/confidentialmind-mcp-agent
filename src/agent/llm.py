@@ -118,6 +118,21 @@ class LLMConnector:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        # Log the LLM request
+        self.logger.info(
+            "LLM request",
+            event_type="llm.request",
+            data={
+                "prompt_length": len(prompt),
+                "prompt_preview": prompt[:200] + "..." if len(prompt) > 200 else prompt,
+                "system_prompt_length": len(system_prompt) if system_prompt else 0,
+                "messages_count": len(messages),
+                "model": "cm-llm",
+                "temperature": 0.7,
+                "max_tokens": 1000
+            }
+        )
+
         try:
             # Use ModelClient's completions_with_usage method
             # This will automatically extract trace context and use the latest configuration
@@ -129,7 +144,22 @@ class LLMConnector:
             )
 
             # Extract the response content
-            return response.choices[0].message.content
+            generated_content = response.choices[0].message.content
+            
+            # Log the LLM response
+            self.logger.info(
+                "LLM response",
+                event_type="llm.response",
+                data={
+                    "response_length": len(generated_content) if generated_content else 0,
+                    "response_preview": (generated_content[:200] + "...") if generated_content and len(generated_content) > 200 else generated_content,
+                    "usage_prompt_tokens": getattr(response.usage, 'prompt_tokens', 0) if hasattr(response, 'usage') else 0,
+                    "usage_completion_tokens": getattr(response.usage, 'completion_tokens', 0) if hasattr(response, 'usage') else 0,
+                    "usage_total_tokens": getattr(response.usage, 'total_tokens', 0) if hasattr(response, 'usage') else 0
+                }
+            )
+            
+            return generated_content
 
         except ConnectorNotConfiguredError as e:
             self.logger.debug(f"LLMConnector: No LLM configured: {e}")
@@ -171,6 +201,22 @@ class LLMConnector:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        # Log the LLM streaming request
+        self.logger.info(
+            "LLM streaming request",
+            event_type="llm.streaming_request",
+            data={
+                "prompt_length": len(prompt),
+                "prompt_preview": prompt[:200] + "..." if len(prompt) > 200 else prompt,
+                "system_prompt_length": len(system_prompt) if system_prompt else 0,
+                "messages_count": len(messages),
+                "model": "cm-llm",
+                "temperature": 0.7,
+                "max_tokens": 1000,
+                "stream": True
+            }
+        )
+
         try:
             # Use ModelClient's completions_with_usage method with streaming
             # This will automatically extract trace context and use the latest configuration
@@ -183,12 +229,28 @@ class LLMConnector:
             )
 
             # Process the streaming response
+            accumulated_content = ""
+            chunk_count = 0
+            
             async for chunk in response_stream:
                 # Extract content from chunk if available
                 if hasattr(chunk, "choices") and chunk.choices:
                     delta = chunk.choices[0].delta
                     if hasattr(delta, "content") and delta.content:
+                        accumulated_content += delta.content
+                        chunk_count += 1
                         yield delta.content
+            
+            # Log the streaming response completion
+            self.logger.info(
+                "LLM streaming response completed",
+                event_type="llm.streaming_response",
+                data={
+                    "total_response_length": len(accumulated_content),
+                    "response_preview": (accumulated_content[:200] + "...") if len(accumulated_content) > 200 else accumulated_content,
+                    "chunks_received": chunk_count
+                }
+            )
 
         except ConnectorNotConfiguredError as e:
             self.logger.debug(f"LLMConnector: No LLM configured: {e}")

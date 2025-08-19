@@ -204,13 +204,16 @@ class Agent:
             )
 
         except Exception as e:
-            self.logger.error("Error during streaming agent execution", error=str(e), error_type=type(e).__name__)
+            logger.error(f"Error during streaming agent execution: {e}", exc_info=True)
             self.logger.error(
                 "Streaming agent error",
                 event_type="agent.streaming.error",
                 error=str(e),
                 error_type=type(e).__name__,
-                data={"stage": "streaming"},
+                data={
+                    "stage": "streaming",
+                    "session_type": "conversation" if session_id and session_id.startswith("conv_") else "session"
+                },
             )
             yield {
                 "type": "error",
@@ -727,18 +730,27 @@ class Agent:
         )
         state.thoughts.append(f"Executing: {action_label}")
 
+        # Prepare enhanced data for logging
+        log_data = {
+            "server_id": server_id,
+            "method": mcp_method,
+            "action_index": state.current_action_index,
+            "total_actions": len(state.planned_actions),
+        }
+        
+        # Add method-specific parameters for better tracing
+        if mcp_method == "readResource" and "uri" in params:
+            log_data["resource_uri"] = params["uri"]
+        elif mcp_method == "callTool":
+            log_data["tool_name"] = params.get("name")
+            log_data["tool_arguments"] = params.get("arguments", {})
+        elif mcp_method == "listResources":
+            log_data["operation"] = "list_all_resources"
+        elif mcp_method == "listTools":
+            log_data["operation"] = "list_all_tools"
+
         # Use context manager for timing
-        with log_operation(
-            "mcp.call",
-            "agent.core",
-            data={
-                "server_id": server_id,
-                "method": mcp_method,
-                "tool_name": params.get("name") if mcp_method == "callTool" else None,
-                "action_index": state.current_action_index,
-                "total_actions": len(state.planned_actions),
-            },
-        ):
+        with log_operation("mcp.call", "agent.core", data=log_data):
             try:
                 result = None
 
@@ -765,15 +777,49 @@ class Agent:
                 state.thoughts.append(f"Action Result: Success for {action_label}")
                 state.mcp_results[action_key] = result
 
-                # Log result size if available
+                # Log meaningful result information
                 if result:
                     import sys
-
                     result_size = sys.getsizeof(result)
-                    self.logger.debug(
-                        "MCP call result size",
-                        event_type="mcp.result.size",
-                        data={"action_key": action_key, "size_bytes": result_size},
+                    
+                    # Create result summary based on method type
+                    result_data = {
+                        "action_key": action_key,
+                        "size_bytes": result_size,
+                        "method": mcp_method,
+                    }
+                    
+                    # Add method-specific result details
+                    if mcp_method == "readResource":
+                        # For resource reads, include content preview
+                        content_preview = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
+                        result_data["content_preview"] = content_preview
+                        result_data["resource_uri"] = params.get("uri", "unknown")
+                        
+                    elif mcp_method == "callTool":
+                        # For tool calls, include tool name and result type
+                        result_data["tool_name"] = params.get("name", "unknown")
+                        result_data["result_type"] = type(result).__name__
+                        # Include result preview if it's a string or dict
+                        if isinstance(result, (str, dict)):
+                            preview = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
+                            result_data["result_preview"] = preview
+                            
+                    elif mcp_method in ["listResources", "listTools"]:
+                        # For list operations, include count
+                        if isinstance(result, list):
+                            result_data["items_count"] = len(result)
+                            if result:
+                                result_data["first_item_preview"] = str(result[0])[:100] + "..." if len(str(result[0])) > 100 else str(result[0])
+                        elif hasattr(result, 'resources'):  # MCP response format
+                            result_data["items_count"] = len(result.resources)
+                        elif hasattr(result, 'tools'):  # MCP response format
+                            result_data["items_count"] = len(result.tools)
+                    
+                    self.logger.info(
+                        "MCP call result",
+                        event_type="mcp.result",
+                        data=result_data,
                     )
 
             except Exception as e:
@@ -1273,23 +1319,6 @@ class Agent:
     async def run(self, query: str, session_id: Optional[str] = None) -> AgentState:
         """Execute the complete agent workflow with observability."""
         logger.info(f"Starting agent run for query: '{query[:50]}...'")
-
-        # Log workflow metadata at start
-        self.logger.info(
-            "Starting agent workflow",
-            event_type="agent.workflow.metadata",
-            data={
-                "query_preview": query[:100] + "..." if len(query) > 100 else query,
-                "session_type": "conversation"
-                if session_id and session_id.startswith("conv_")
-                else "session",
-                "connections": {
-                    "database": self.db.is_connected(),
-                    "llm": self.llm.is_connected(),
-                    "tools": len(self.transport_manager.get_all_clients()) > 0,
-                },
-            },
-        )
 
         # Update connection status
         self._db_connected = self.db.is_connected()
