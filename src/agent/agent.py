@@ -69,7 +69,7 @@ class Agent:
         if self._initialized:
             return True
             
-        logger.info("Initializing agent...")
+        self.logger.info("Initializing agent")
 
         # Check connection status
         self._db_connected = self.db.is_connected()
@@ -93,9 +93,9 @@ class Agent:
         # Log available clients
         clients = self.transport_manager.get_all_clients()
         client_info = ", ".join([f"{k}" for k in clients.keys()]) if clients else "none"
-        logger.info(f"Initialized agent with MCP clients: {client_info}")
-        logger.info(f"Database connected: {self._db_connected}")
-        logger.info(f"LLM connected: {self._llm_connected}")
+        self.logger.info("Initialized agent with MCP clients", client_info=client_info)
+        self.logger.info("Database connection status", connected=self._db_connected)
+        self.logger.info("LLM connection status", connected=self._llm_connected)
 
         return True
 
@@ -106,13 +106,13 @@ class Agent:
         # Connect to all MCP clients
         for server_id, client in self.transport_manager.get_all_clients().items():
             try:
-                logger.debug(f"Connecting to MCP server: {server_id}")
+                self.logger.debug("Connecting to MCP server", server_id=server_id)
                 await client.__aenter__()
                 # Register exit callback to ensure cleanup
                 self._exit_stack.push_async_callback(client.__aexit__, None, None, None)
-                logger.debug(f"Successfully connected to MCP server: {server_id}")
+                self.logger.debug("Successfully connected to MCP server", server_id=server_id)
             except Exception as e:
-                logger.error(f"Failed to connect to MCP server {server_id}: {e}")
+                self.logger.error("Failed to connect to MCP server", server_id=server_id, error=str(e))
                 # Continue with other servers
 
         self._initialized = True
@@ -134,7 +134,7 @@ class Agent:
         Yields:
             Dict containing workflow updates and final streaming response
         """
-        logger.info(f"Starting streaming agent run for query: '{query[:50]}...'")
+        self.logger.info("Starting streaming agent run", query_preview=query[:50] + "..." if len(query) > 50 else query)
 
         self.logger.info(
             "Starting streaming agent run",
@@ -204,7 +204,7 @@ class Agent:
             )
 
         except Exception as e:
-            logger.error(f"Error during streaming agent execution: {e}", exc_info=True)
+            self.logger.error("Error during streaming agent execution", error=str(e), error_type=type(e).__name__)
             self.logger.error(
                 "Streaming agent error",
                 event_type="agent.streaming.error",
@@ -644,8 +644,8 @@ class Agent:
             state.thoughts.append(thought)
             if plan != "No plan provided.":
                 state.thoughts.append(f"Plan: {plan}")
-            logger.info(f"Agent Thought: {thought}")
-            logger.info(f"Plan: {plan}")
+            self.logger.info("Agent Thought", thought=thought)
+            self.logger.info("Agent Plan", plan=plan)
 
             # Set planned actions
             state.planned_actions = parsed_response.get("actions", [])

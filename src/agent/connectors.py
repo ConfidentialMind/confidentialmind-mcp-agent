@@ -199,12 +199,24 @@ class ConnectorConfigManager:
 
                 if servers:
                     logger.info(
-                        f"ConnectorConfigManager: Retrieved {len(servers)} MCP server URLs from stack"
+                        f"ConnectorConfigManager: Retrieved {len(servers)} MCP server URLs from stack",
+                        _exclude_from_trace=True,
+                        servers_count=len(servers),
+                        config_id=config_id
                     )
                     return servers
                 else:
-                    logger.warning(f"ConnectorConfigManager: No MCP servers found for {config_id}")
+                    logger.warning(
+                        f"ConnectorConfigManager: No MCP servers found for {config_id}",
+                        _exclude_from_trace=True,
+                        config_id=config_id
+                    )
                     return {}
             except Exception as e:
-                logger.error(f"ConnectorConfigManager: Error fetching MCP servers: {e}")
+                logger.error(
+                    f"ConnectorConfigManager: Error fetching MCP servers: {e}",
+                    _exclude_from_trace=True,
+                    error=str(e),
+                    config_id=config_id
+                )
                 return {}

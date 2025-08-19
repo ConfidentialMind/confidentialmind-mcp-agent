@@ -15,6 +15,10 @@ def add_trace_context_processor(logger, method_name, event_dict):
     """Add trace context to log entries automatically."""
     from .tracing import get_current_trace
     
+    # Check if this log should be excluded from tracing
+    if event_dict.pop("_exclude_from_trace", False):
+        return event_dict
+    
     trace = get_current_trace()
     if trace:
         event_dict.update({
