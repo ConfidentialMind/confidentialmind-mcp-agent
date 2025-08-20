@@ -46,7 +46,8 @@ from .logging import (
 from .decorators import (
     traced,
     traced_async,
-    log_operation
+    log_operation,
+    SpanMetrics
 )
 
 __all__ = [
@@ -86,6 +87,7 @@ __all__ = [
     
     # Decorators
     "traced",
-    "traced_async", 
-    "log_operation"
+    "traced_async",
+    "log_operation",
+    "SpanMetrics"
 ]
