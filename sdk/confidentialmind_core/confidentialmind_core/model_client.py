@@ -65,12 +65,13 @@ class ModelClient:
         """Generate a new trace ID for the request"""
         return str(uuid.uuid4().hex)
     
-    def _log_completion_request(self, messages: list, **kwargs):
+    def _log_completion_request(self, **kwargs):
         """Log completion request details."""
         if not self.auto_log:
             return
             
         # Extract prompt from messages
+        messages = kwargs.get('messages', [])
         prompt = ""
         system_prompt = ""
         for msg in messages:
@@ -434,7 +435,7 @@ class ModelClient:
         
         # Log the request if auto_log enabled
         if self.auto_log:
-            self._log_completion_request(kwargs.get('messages', []), **kwargs)
+            self._log_completion_request(**kwargs)
         
         # Check if original request wanted usage data (only relevant for streaming)
         original_wants_usage = kwargs.get('stream_options', {}).get('include_usage', False)
