@@ -32,7 +32,9 @@ class ConnectorConfigManager:
             os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
         )
         logger.info(
-            f"ConnectorConfigManager: Initializing in {'stack deployment' if self.is_stack_deployment else 'local development'} mode"
+            f"ConnectorConfigManager: Initializing in {'stack deployment' if self.is_stack_deployment else 'local development'} mode",
+            _exclude_from_trace=True,
+            deployment_mode="stack" if self.is_stack_deployment else "local"
         )
         self._background_tasks = []
 
@@ -44,13 +46,13 @@ class ConnectorConfigManager:
             register_connectors: Whether to register connectors with ConfigManager
         """
         if self.initialized:
-            logger.debug("ConnectorConfigManager: Already initialized")
+            logger.debug("ConnectorConfigManager: Already initialized", _exclude_from_trace=True)
             return
 
         if register_connectors and self.is_stack_deployment:
             # Register connectors with the ConfigManager in stack deployment mode
             try:
-                logger.info("ConnectorConfigManager: Registering connectors with ConfigManager")
+                logger.info("ConnectorConfigManager: Registering connectors with ConfigManager", _exclude_from_trace=True)
                 config_manager = ConfigManager()
 
                 # Register connectors that the agent needs
@@ -92,7 +94,11 @@ class ConnectorConfigManager:
                     array_connectors_count=len(array_connectors)
                 )
             except Exception as e:
-                logger.error(f"ConnectorConfigManager: Error registering connectors: {e}")
+                logger.error(
+                    f"ConnectorConfigManager: Error registering connectors: {e}",
+                    _exclude_from_trace=True,
+                    error=str(e)
+                )
                 # Continue without raising - allow app to initialize without connectors
 
         self.initialized = True
@@ -173,7 +179,8 @@ class ConnectorConfigManager:
 
             if not servers:
                 logger.warning(
-                    "ConnectorConfigManager: No MCP servers found in environment variables"
+                    "ConnectorConfigManager: No MCP servers found in environment variables",
+                    _exclude_from_trace=True
                 )
 
             return servers
