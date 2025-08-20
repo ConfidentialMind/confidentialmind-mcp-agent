@@ -86,7 +86,10 @@ class ConnectorConfigManager:
                 )
 
                 logger.info(
-                    f"ConnectorConfigManager: Registered {len(connectors)} connectors and {len(array_connectors)} array connectors"
+                    f"ConnectorConfigManager: Registered {len(connectors)} connectors and {len(array_connectors)} array connectors",
+                    _exclude_from_trace=True,
+                    connectors_count=len(connectors),
+                    array_connectors_count=len(array_connectors)
                 )
             except Exception as e:
                 logger.error(f"ConnectorConfigManager: Error registering connectors: {e}")
