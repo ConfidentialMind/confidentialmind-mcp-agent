@@ -380,7 +380,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 # Import observability components
-from src.shared.logging import get_logger, TraceContext
+from confidentialmind_core import get_logger, TraceContext
 
 from .connection_manager import ConnectionManager
 from .settings import settings
@@ -839,7 +839,7 @@ The ConfidentialMind MCP stack includes comprehensive observability features wit
    Add these imports to your server module:
 
    ```python
-   from src.shared.logging import get_logger, TraceContext
+   from confidentialmind_core import get_logger, TraceContext
    import time  # For duration tracking
 
    # Replace standard logger with structured logger
@@ -1252,7 +1252,7 @@ from fastmcp import Context, FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from src.shared.logging import get_logger, TraceContext
+from confidentialmind_core import get_logger, TraceContext
 
 class DBConnectionManager:
     # Database connection management code here...

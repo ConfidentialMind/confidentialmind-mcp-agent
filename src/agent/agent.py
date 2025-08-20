@@ -16,7 +16,7 @@ from src.agent.database import Database
 from src.agent.llm import LLMConnector
 from src.agent.state import AgentState, Message
 from src.agent.transport import TransportManager
-from src.shared.logging import get_logger, log_operation, traced_async
+from confidentialmind_core import get_logger, log_operation, traced_async
 
 logger = logging.getLogger(__name__)
 

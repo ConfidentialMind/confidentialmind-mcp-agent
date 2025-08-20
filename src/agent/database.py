@@ -12,7 +12,7 @@ from pydantic_settings import BaseSettings
 
 from src.agent.connectors import ConnectorConfigManager
 from src.agent.state import Message
-from src.shared.logging import get_current_trace, get_logger, traced_async
+from confidentialmind_core import get_current_trace, get_logger, traced_async
 
 # Configure logging
 logger = logging.getLogger(__name__)

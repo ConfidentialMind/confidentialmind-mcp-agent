@@ -10,7 +10,7 @@ from fastmcp.client.transports import PythonStdioTransport, StreamableHttpTransp
 
 from src.agent.connectors import ConnectorConfigManager
 from src.agent.module_transport import ModuleStdioTransport, path_to_module_path
-from src.shared.logging import get_current_trace, get_logger, traced_async
+from confidentialmind_core import get_current_trace, get_logger, traced_async
 
 logger = logging.getLogger(__name__)
 
