@@ -32,6 +32,7 @@ class ModelClient:
         url_suffix: str = "/v1/",
         auto_track_usage: bool = True,
         auto_trace: bool = True,
+        auto_log: bool = True,
         index: Optional[int] = None
     ):
         """
@@ -42,12 +43,14 @@ class ModelClient:
             url_suffix: URL suffix to append to the base URL (default: "/v1/")
             auto_track_usage: Whether to automatically track token usage
             auto_trace: Whether to automatically extract trace context
+            auto_log: Whether to automatically log LLM requests and responses
             index: For array connectors, the index of the specific endpoint to use (0-based)
         """
         self.config_id = config_id
         self.url_suffix = url_suffix
         self.auto_track_usage = auto_track_usage
         self.auto_trace = auto_trace
+        self.auto_log = auto_log
         self.index = index
         
         # Client management (similar to existing ClientManager)
@@ -61,6 +64,107 @@ class ModelClient:
     def _generate_trace_id(self) -> str:
         """Generate a new trace ID for the request"""
         return str(uuid.uuid4().hex)
+    
+    def _log_completion_request(self, messages: list, **kwargs):
+        """Log completion request details."""
+        if not self.auto_log:
+            return
+            
+        # Extract prompt from messages
+        prompt = ""
+        system_prompt = ""
+        for msg in messages:
+            if msg.get("role") == "system":
+                system_prompt = msg.get("content", "")
+            elif msg.get("role") == "user":
+                prompt = msg.get("content", "")
+        
+        event_type = "llm.streaming_request" if kwargs.get("stream") else "llm.request"
+        
+        logger.info(
+            f"LLM {'streaming ' if kwargs.get('stream') else ''}request",
+            event_type=event_type,
+            data={
+                "prompt_length": len(prompt),
+                "prompt_preview": prompt[:200] + "..." if len(prompt) > 200 else prompt,
+                "system_prompt_length": len(system_prompt) if system_prompt else 0,
+                "messages_count": len(messages),
+                "model": kwargs.get("model", "unknown"),
+                "temperature": kwargs.get("temperature"),
+                "max_tokens": kwargs.get("max_tokens"),
+                "stream": kwargs.get("stream", False)
+            }
+        )
+    
+    def _log_completion_response(self, response, accumulated_content: Optional[str] = None, chunk_count: Optional[int] = None):
+        """Log completion response details."""
+        if not self.auto_log:
+            return
+        
+        if accumulated_content is not None:
+            # Streaming response
+            logger.info(
+                "LLM streaming response completed",
+                event_type="llm.streaming_response",
+                data={
+                    "total_response_length": len(accumulated_content),
+                    "response_preview": (accumulated_content[:10000] + "...") if len(accumulated_content) > 10000 else accumulated_content,
+                    "chunks_received": chunk_count or 0
+                }
+            )
+        else:
+            # Non-streaming response
+            content = response.choices[0].message.content if response.choices else ""
+            logger.info(
+                "LLM response",
+                event_type="llm.response",
+                data={
+                    "response_length": len(content) if content else 0,
+                    "response_preview": (content[:10000] + "...") if content and len(content) > 10000 else content,
+                    "usage_prompt_tokens": getattr(response.usage, 'prompt_tokens', 0) if hasattr(response, 'usage') else 0,
+                    "usage_completion_tokens": getattr(response.usage, 'completion_tokens', 0) if hasattr(response, 'usage') else 0,
+                    "usage_total_tokens": getattr(response.usage, 'total_tokens', 0) if hasattr(response, 'usage') else 0
+                }
+            )
+    
+    def _log_embedding_request(self, **kwargs):
+        """Log embedding request details."""
+        if not self.auto_log:
+            return
+        
+        input_text = kwargs.get("input", "")
+        if isinstance(input_text, list):
+            input_text = " ".join(str(item) for item in input_text)
+        
+        logger.info(
+            "Embedding request",
+            event_type="embedding.request", 
+            data={
+                "input_length": len(str(input_text)),
+                "input_preview": str(input_text)[:200] + "..." if len(str(input_text)) > 200 else str(input_text),
+                "model": kwargs.get("model", "unknown"),
+                "dimensions": kwargs.get("dimensions"),
+            }
+        )
+    
+    def _log_embedding_response(self, response):
+        """Log embedding response details."""
+        if not self.auto_log:
+            return
+        
+        embeddings_count = len(response.data) if hasattr(response, 'data') else 0
+        embedding_dimensions = len(response.data[0].embedding) if embeddings_count > 0 else 0
+        
+        logger.info(
+            "Embedding response",
+            event_type="embedding.response",
+            data={
+                "embeddings_count": embeddings_count,
+                "embedding_dimensions": embedding_dimensions,
+                "usage_prompt_tokens": getattr(response.usage, 'prompt_tokens', 0) if hasattr(response, 'usage') else 0,
+                "usage_total_tokens": getattr(response.usage, 'total_tokens', 0) if hasattr(response, 'usage') else 0
+            }
+        )
     
     def get_client(self) -> AsyncOpenAI:
         """
@@ -265,6 +369,8 @@ class ModelClient:
             Response chunks (with usage chunk filtered based on forward_usage_chunk)
         """
         usage_data = None
+        accumulated_content = ""
+        chunk_count = 0
         
         async for chunk in response_stream:
             # Check if this is the final usage chunk
@@ -280,8 +386,19 @@ class ModelClient:
                 # Otherwise, we consume this chunk and don't forward it
                 
             else:
-                # Regular content chunk - always forward
+                # Regular content chunk - track content for logging
+                if hasattr(chunk, "choices") and chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if hasattr(delta, "content") and delta.content:
+                        accumulated_content += delta.content
+                        chunk_count += 1
+                
+                # Always forward regular chunks
                 yield chunk
+        
+        # Log streaming response completion if auto_log enabled
+        if self.auto_log:
+            self._log_completion_response(None, accumulated_content, chunk_count)
         
         # Report usage data after stream completes
         if self.auto_track_usage and usage_data:
@@ -315,6 +432,10 @@ class ModelClient:
         
         request_trace_id = trace_id or self._generate_trace_id()
         
+        # Log the request if auto_log enabled
+        if self.auto_log:
+            self._log_completion_request(kwargs.get('messages', []), **kwargs)
+        
         # Check if original request wanted usage data (only relevant for streaming)
         original_wants_usage = kwargs.get('stream_options', {}).get('include_usage', False)
         
@@ -336,7 +457,9 @@ class ModelClient:
                 user_api_key
             )
         else:
-            # Non-streaming: report usage and return response as-is
+            # Non-streaming: log response and report usage
+            if self.auto_log:
+                self._log_completion_response(response)
             if self.auto_track_usage and hasattr(response, 'usage'):
                 await self._report_completion_usage(response.usage, request_trace_id, user_api_key)
             return response
@@ -367,8 +490,16 @@ class ModelClient:
         
         request_trace_id = trace_id or self._generate_trace_id()
         
+        # Log the request if auto_log enabled
+        if self.auto_log:
+            self._log_embedding_request(**kwargs)
+        
         # Make the API call
         response = await self.get_client().embeddings.create(**kwargs)
+        
+        # Log the response if auto_log enabled
+        if self.auto_log:
+            self._log_embedding_response(response)
         
         # Report usage if available and tracking is enabled
         if self.auto_track_usage and hasattr(response, 'usage'):
