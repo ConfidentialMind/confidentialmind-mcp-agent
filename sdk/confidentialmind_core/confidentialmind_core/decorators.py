@@ -7,12 +7,37 @@ import functools
 import inspect
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any, Callable, Dict, Optional, TypeVar
 
 from .logging import get_logger
 from .tracing import TraceContext, get_current_trace
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+# Store metrics for the current span
+_span_metrics: ContextVar[Dict[str, Any]] = ContextVar("span_metrics", default={})
+
+
+class SpanMetrics:
+    """Simple API to add metrics to the current span."""
+    
+    @staticmethod
+    def add(**kwargs):
+        """Add metrics that will appear in the span's complete log."""
+        current = _span_metrics.get().copy()
+        current.update(kwargs)
+        _span_metrics.set(current)
+    
+    @staticmethod
+    def clear():
+        """Clear current span metrics."""
+        _span_metrics.set({})
+    
+    @staticmethod
+    def get() -> Dict[str, Any]:
+        """Get current span metrics."""
+        return _span_metrics.get()
 
 
 def extract_function_attributes(func: Callable, args: tuple, kwargs: dict) -> Dict[str, Any]:
@@ -58,8 +83,37 @@ def extract_function_attributes(func: Callable, args: tuple, kwargs: dict) -> Di
         return {}
 
 
+def _get_logger_name(func: Callable) -> str:
+    """
+    Extract a sensible logger name from the function's module path.
+    
+    Args:
+        func: The function being decorated
+        
+    Returns:
+        A logger name based on the module path
+    """
+    module_parts = func.__module__.split(".")
+    
+    # Simple heuristic: use the last 2 parts of the module path
+    # e.g., "src.agent.core" -> "agent.core"
+    #       "myapp.services.auth" -> "services.auth"
+    #       "main" -> "main"
+    
+    if len(module_parts) >= 2:
+        # Skip common prefixes like 'src'
+        if module_parts[0] in ('src', 'app', 'lib'):
+            return '.'.join(module_parts[1:3]) if len(module_parts) > 2 else module_parts[1]
+        else:
+            return '.'.join(module_parts[-2:])
+    else:
+        return module_parts[0] if module_parts else "default"
+
+
 def traced_async(
-    event_type: Optional[str] = None, logger_name: Optional[str] = None, extract_args: bool = True
+    event_type: Optional[str] = None, 
+    logger_name: Optional[str] = None, 
+    extract_args: bool = True
 ) -> Callable[[F], F]:
     """
     Decorator for tracing async functions with automatic span management.
@@ -74,34 +128,18 @@ def traced_async(
         nonlocal event_type, logger_name
 
         if not event_type:
-            event_type = f"{func.__module__.split('.')[-1]}.{func.__name__}"
+            # Default to last module part + function name
+            module_last = func.__module__.split('.')[-1]
+            event_type = f"{module_last}.{func.__name__}"
 
         if not logger_name:
-            # Extract sensible logger name from module path
-            module_parts = func.__module__.split(".")
-            if len(module_parts) >= 2 and module_parts[0] == "src":
-                if module_parts[1] == "baserag":
-                    if len(module_parts) > 3:
-                        # src.baserag.implementations.chunkers -> baserag.chunkers
-                        if module_parts[2] == "implementations":
-                            logger_name = f"baserag.{module_parts[3]}"
-                        else:
-                            logger_name = f"baserag.{module_parts[2]}"
-                    else:
-                        logger_name = "baserag.core"
-                elif module_parts[1] == "agent":
-                    logger_name = "agent." + module_parts[2] if len(module_parts) > 2 else "agent.core"
-                elif module_parts[1] == "tools":
-                    logger_name = module_parts[2] if len(module_parts) > 2 else "tools"
-                elif module_parts[1] == "shared":
-                    logger_name = "shared." + module_parts[2] if len(module_parts) > 2 else "shared"
-                else:
-                    logger_name = module_parts[1]
-            else:
-                logger_name = module_parts[-1] if module_parts else "default"
+            logger_name = _get_logger_name(func)
 
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
+            # Clear any previous span metrics
+            SpanMetrics.clear()
+            
             logger = get_logger(logger_name)
 
             # Create child span for this operation
@@ -134,7 +172,14 @@ def traced_async(
             try:
                 result = await func(*args, **kwargs)
 
-                # Log success
+                # Get accumulated metrics
+                span_metrics = SpanMetrics.get()
+                
+                # Combine original attributes with accumulated metrics
+                complete_data = attributes.copy() if extract_args else {}
+                complete_data.update(span_metrics)
+
+                # Log success with enriched data
                 duration_ms = (time.time() - start_time) * 1000
                 logger.info(
                     f"Completed {event_type}",
@@ -143,12 +188,17 @@ def traced_async(
                     parent_span_id=parent_span_id,
                     duration_ms=duration_ms,
                     success=True,
-                    data=attributes,
+                    data=complete_data,
                 )
 
                 return result
 
             except Exception as e:
+                # Get any metrics that were accumulated before the error
+                span_metrics = SpanMetrics.get()
+                error_data = attributes.copy() if extract_args else {}
+                error_data.update(span_metrics)
+                
                 # Log error
                 duration_ms = (time.time() - start_time) * 1000
                 logger.error(
@@ -160,14 +210,15 @@ def traced_async(
                     success=False,
                     error=str(e),
                     error_type=type(e).__name__,
-                    data=attributes,
+                    data=error_data,
                 )
                 raise
 
             finally:
-                # Restore parent span
+                # Restore parent span and clear metrics
                 if trace and old_span:
                     TraceContext.set_span(old_span, trace.parent_span_id)
+                SpanMetrics.clear()
 
         return wrapper
 
@@ -175,7 +226,9 @@ def traced_async(
 
 
 def traced(
-    event_type: Optional[str] = None, logger_name: Optional[str] = None, extract_args: bool = True
+    event_type: Optional[str] = None, 
+    logger_name: Optional[str] = None, 
+    extract_args: bool = True
 ) -> Callable[[F], F]:
     """
     Decorator for tracing synchronous functions.
@@ -190,34 +243,17 @@ def traced(
         nonlocal event_type, logger_name
 
         if not event_type:
-            event_type = f"{func.__module__.split('.')[-1]}.{func.__name__}"
+            module_last = func.__module__.split('.')[-1]
+            event_type = f"{module_last}.{func.__name__}"
 
         if not logger_name:
-            # Extract sensible logger name from module path
-            module_parts = func.__module__.split(".")
-            if len(module_parts) >= 2 and module_parts[0] == "src":
-                if module_parts[1] == "baserag":
-                    if len(module_parts) > 3:
-                        # src.baserag.implementations.chunkers -> baserag.chunkers
-                        if module_parts[2] == "implementations":
-                            logger_name = f"baserag.{module_parts[3]}"
-                        else:
-                            logger_name = f"baserag.{module_parts[2]}"
-                    else:
-                        logger_name = "baserag.core"
-                elif module_parts[1] == "agent":
-                    logger_name = "agent." + module_parts[2] if len(module_parts) > 2 else "agent.core"
-                elif module_parts[1] == "tools":
-                    logger_name = module_parts[2] if len(module_parts) > 2 else "tools"
-                elif module_parts[1] == "shared":
-                    logger_name = "shared." + module_parts[2] if len(module_parts) > 2 else "shared"
-                else:
-                    logger_name = module_parts[1]
-            else:
-                logger_name = module_parts[-1] if module_parts else "default"
+            logger_name = _get_logger_name(func)
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            # Clear any previous span metrics
+            SpanMetrics.clear()
+            
             logger = get_logger(logger_name)
 
             # Create child span for this operation
@@ -250,7 +286,14 @@ def traced(
             try:
                 result = func(*args, **kwargs)
 
-                # Log success
+                # Get accumulated metrics
+                span_metrics = SpanMetrics.get()
+                
+                # Combine original attributes with accumulated metrics
+                complete_data = attributes.copy() if extract_args else {}
+                complete_data.update(span_metrics)
+
+                # Log success with enriched data
                 duration_ms = (time.time() - start_time) * 1000
                 logger.info(
                     f"Completed {event_type}",
@@ -259,12 +302,17 @@ def traced(
                     parent_span_id=parent_span_id,
                     duration_ms=duration_ms,
                     success=True,
-                    data=attributes,
+                    data=complete_data,
                 )
 
                 return result
 
             except Exception as e:
+                # Get any metrics that were accumulated before the error
+                span_metrics = SpanMetrics.get()
+                error_data = attributes.copy() if extract_args else {}
+                error_data.update(span_metrics)
+                
                 # Log error
                 duration_ms = (time.time() - start_time) * 1000
                 logger.error(
@@ -276,14 +324,15 @@ def traced(
                     success=False,
                     error=str(e),
                     error_type=type(e).__name__,
-                    data=attributes,
+                    data=error_data,
                 )
                 raise
 
             finally:
-                # Restore parent span
+                # Restore parent span and clear metrics
                 if trace and old_span:
                     TraceContext.set_span(old_span, trace.parent_span_id)
+                SpanMetrics.clear()
 
         return wrapper
 
@@ -315,6 +364,9 @@ class log_operation:
         self.old_span = None
 
     def __enter__(self):
+        # Clear any previous span metrics
+        SpanMetrics.clear()
+        
         # Create child span
         trace = get_current_trace()
         self.parent_span_id = trace.span_id if trace else None
@@ -336,9 +388,18 @@ class log_operation:
         )
 
         return self
+    
+    def add_metrics(self, **kwargs):
+        """Add metrics to be included in the complete log."""
+        SpanMetrics.add(**kwargs)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         duration_ms = (time.time() - self.start_time) * 1000
+        
+        # Get accumulated metrics
+        span_metrics = SpanMetrics.get()
+        complete_data = self.data.copy()
+        complete_data.update(span_metrics)
 
         if exc_type is None:
             # Success
@@ -349,7 +410,7 @@ class log_operation:
                 parent_span_id=self.parent_span_id,
                 duration_ms=duration_ms,
                 success=True,
-                data=self.data,
+                data=complete_data,
             )
         else:
             # Error
@@ -362,10 +423,11 @@ class log_operation:
                 success=False,
                 error=str(exc_val),
                 error_type=exc_type.__name__ if exc_type else "Unknown",
-                data=self.data,
+                data=complete_data,
             )
 
-        # Restore parent span
+        # Restore parent span and clear metrics
         trace = get_current_trace()
         if trace and self.old_span:
             TraceContext.set_span(self.old_span, trace.parent_span_id)
+        SpanMetrics.clear()

@@ -16,7 +16,7 @@ from src.agent.database import Database
 from src.agent.llm import LLMConnector
 from src.agent.state import AgentState, Message
 from src.agent.transport import TransportManager
-from confidentialmind_core import get_logger, log_operation, traced_async
+from confidentialmind_core import get_logger, log_operation, traced_async, SpanMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class Agent:
 
     # --- Streaming Support ---
 
-    @traced_async("agent.run_streaming")
+    @traced_async()
     async def run_streaming(
         self, query: str, session_id: Optional[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -136,12 +136,6 @@ class Agent:
         """
         self.logger.info("Starting streaming agent run", query_preview=query[:50] + "..." if len(query) > 50 else query)
 
-        self.logger.info(
-            "Starting streaming agent run",
-            event_type="agent.streaming.start",
-            data={"query_preview": query[:50] + "...", "session_id": session_id},
-        )
-
         stage_timings = {}
         stage_start = time.time()
 
@@ -151,15 +145,13 @@ class Agent:
 
             stage_timings["workflow_stages"] = (time.time() - stage_start) * 1000
 
-            # Log stage completion
-            self.logger.info(
-                "Streaming stages completed",
-                event_type="agent.streaming.stages_complete",
-                data={
-                    "stages_duration_ms": stage_timings["workflow_stages"],
-                    "has_error": bool(state.error),
-                    "action_count": state.current_action_index,
-                },
+            # Add workflow metrics
+            SpanMetrics.add(
+                workflow_completed=not bool(state.error),
+                total_actions_executed=state.current_action_index,
+                has_tools=self._has_tools,
+                db_connected=self._db_connected,
+                workflow_duration_ms=stage_timings["workflow_stages"]
             )
 
             # If there was an error in the workflow, yield it and return
@@ -185,36 +177,34 @@ class Agent:
             # Stream the final response generation
             stream_start = time.time()
             chunk_count = 0
+            full_response = ""
 
             async for chunk in self._generate_response_streaming(state):
                 chunk_count += 1
+                if chunk.get("type") == "response_complete":
+                    full_response = chunk.get("full_response", "")
                 yield chunk
 
             stage_timings["streaming"] = (time.time() - stream_start) * 1000
 
-            # Log streaming metrics
-            self.logger.info(
-                "Streaming completed",
-                event_type="agent.streaming.metrics",
-                data={
-                    "chunk_count": chunk_count,
-                    "streaming_duration_ms": stage_timings["streaming"],
-                    "total_duration_ms": sum(stage_timings.values()),
-                },
+            # Add streaming metrics to span
+            SpanMetrics.add(
+                stream_chunks=chunk_count,
+                total_response_length=len(full_response),
+                streaming_duration_ms=stage_timings["streaming"],
+                total_duration_ms=sum(stage_timings.values())
             )
 
         except Exception as e:
             logger.error(f"Error during streaming agent execution: {e}", exc_info=True)
-            self.logger.error(
-                "Streaming agent error",
-                event_type="agent.streaming.error",
-                error=str(e),
-                error_type=type(e).__name__,
-                data={
-                    "stage": "streaming",
-                    "session_type": "conversation" if session_id and session_id.startswith("conv_") else "session"
-                },
+            
+            # Add error metrics
+            SpanMetrics.add(
+                streaming_error=str(e),
+                error_stage="streaming",
+                session_type="conversation" if session_id and session_id.startswith("conv_") else "session"
             )
+            
             yield {
                 "type": "error",
                 "error": str(e),
@@ -413,17 +403,9 @@ class Agent:
 
     # --- Core Workflow Methods ---
 
-    @traced_async("agent.stage.initialize_context", "agent.core")
+    @traced_async()
     async def _initialize_context(self, state: AgentState) -> AgentState:
         """Initialize context with tracing."""
-        logger.info("Initializing agent context...")
-
-        # Log pre-discovery state
-        self.logger.info(
-            "Starting tool discovery",
-            event_type="agent.discovery.start",
-            data={"client_count": len(self.transport_manager.get_all_clients())},
-        )
 
         # Update status flags
         self._db_connected = self.db.is_connected()
@@ -437,6 +419,14 @@ class Agent:
             state.execution_context["available_resources"] = []
             state.execution_context["server_ids"] = []
             self._has_tools = False
+            
+            # Add metrics for the complete log
+            SpanMetrics.add(
+                tools_discovered=0,
+                resources_discovered=0,
+                servers_connected=0,
+                skipped_reason="no_clients"
+            )
             return state
 
         try:
@@ -506,17 +496,12 @@ class Agent:
                     state.execution_context["available_resources"].extend(resource_list)
                     logger.debug(f"Found {len(resource_list)} resources from {server_id}")
 
-            # Log discovery results
-            self.logger.info(
-                "Tool discovery completed",
-                event_type="agent.discovery.complete",
-                data={
-                    "tools_discovered": len(state.execution_context.get("available_tools", [])),
-                    "resources_discovered": len(
-                        state.execution_context.get("available_resources", [])
-                    ),
-                    "servers": state.execution_context.get("server_ids", []),
-                },
+            # Add discovery metrics to the span
+            SpanMetrics.add(
+                tools_discovered=len(state.execution_context.get("available_tools", [])),
+                resources_discovered=len(state.execution_context.get("available_resources", [])),
+                servers_connected=len(state.execution_context.get("server_ids", [])),
+                server_ids=state.execution_context.get("server_ids", [])
             )
 
             return state
@@ -524,9 +509,17 @@ class Agent:
         except Exception as e:
             state.error = f"Failed to initialize context: {str(e)}"
             logger.error(f"Error in initialize_context: {e}", exc_info=True)
+            
+            # Add error metrics
+            SpanMetrics.add(
+                initialization_error=str(e),
+                partial_tools=len(state.execution_context.get("available_tools", [])),
+                partial_resources=len(state.execution_context.get("available_resources", []))
+            )
+            
             return state
 
-    @traced_async("agent.stage.parse_query", "agent.core")
+    @traced_async()
     async def _parse_query(self, state: AgentState) -> AgentState:
         """Parse query with LLM tracing."""
         logger.info("Parsing user query: %s", state.query)
@@ -627,7 +620,7 @@ class Agent:
             # Call the LLM with timing
             logger.debug("Sending query to LLM for planning...")
 
-            # Log LLM call
+            # Use context manager with metrics
             with log_operation(
                 "llm.call",
                 "agent.core",
@@ -635,10 +628,17 @@ class Agent:
                     "purpose": "parse_query",
                     "model": "cm-llm",
                     "query_length": len(state.query),
-                },
-            ):
+                }
+            ) as op:
                 response = await self.llm.generate(prompt)
                 parsed_response = self._parse_json_response(response)
+                
+                # Add metrics to the operation
+                op.add_metrics(
+                    response_length=len(response),
+                    actions_planned=len(parsed_response.get("actions", []))
+                )
+                
                 logger.debug("Received and parsed LLM planning response")
 
             # Extract planning information
@@ -655,25 +655,6 @@ class Agent:
             state.current_action_index = 0
             logger.info(f"Planned {len(state.planned_actions)} actions.")
 
-            # Log planning results
-            if not state.error:
-                self.logger.info(
-                    "Query planning completed",
-                    event_type="agent.planning.complete",
-                    data={
-                        "action_count": len(state.planned_actions),
-                        "needs_more_info": state.needs_more_info,
-                        "actions": [
-                            {
-                                "server_id": a.get("server_id"),
-                                "method": a.get("mcp_method"),
-                                "tool": a.get("params", {}).get("name"),
-                            }
-                            for a in state.planned_actions
-                        ],
-                    },
-                )
-
             # Log the planned actions for debugging
             for i, action in enumerate(state.planned_actions):
                 logger.debug(
@@ -688,13 +669,29 @@ class Agent:
                     f"Needs more info: {state.follow_up_question or 'General clarification'}"
                 )
 
+            # Add planning metrics to the span
+            SpanMetrics.add(
+                actions_planned=len(state.planned_actions),
+                needs_more_info=state.needs_more_info,
+                thought_summary=thought[:100] if thought else None,
+                plan_summary=plan[:100] if plan else None
+            )
+
             return state
 
         except Exception as e:
             state.error = f"Failed to parse query: {str(e)}"
             logger.error(f"Error in parse_query: {e}", exc_info=True)
+            
+            # Add error metrics
+            SpanMetrics.add(
+                parse_error=str(e),
+                partial_actions=len(state.planned_actions)
+            )
+            
             return state
 
+    @traced_async()
     async def _execute_mcp_actions(self, state: AgentState) -> AgentState:
         """Execute MCP actions with detailed tracing."""
         if state.current_action_index >= len(state.planned_actions):
@@ -713,6 +710,11 @@ class Agent:
             state.mcp_results[action_key] = {"error": error_msg}
             state.current_action_index += 1
             state.error = error_msg
+            
+            SpanMetrics.add(
+                action_error=error_msg,
+                action_index=state.current_action_index
+            )
             return state
 
         # Get the MCP client
@@ -721,6 +723,12 @@ class Agent:
             state.mcp_results[action_key] = {"error": error_msg}
             state.current_action_index += 1
             state.error = error_msg
+            
+            SpanMetrics.add(
+                action_error=error_msg,
+                action_index=state.current_action_index,
+                missing_client=server_id
+            )
             return state
 
         client = self.transport_manager.get_client(server_id)
@@ -750,7 +758,7 @@ class Agent:
             log_data["operation"] = "list_all_tools"
 
         # Use context manager for timing
-        with log_operation("mcp.call", "agent.core", data=log_data):
+        with log_operation("mcp.call", "agent.core", data=log_data) as op:
             try:
                 result = None
 
@@ -777,50 +785,21 @@ class Agent:
                 state.thoughts.append(f"Action Result: Success for {action_label}")
                 state.mcp_results[action_key] = result
 
-                # Log meaningful result information
-                if result:
-                    import sys
-                    result_size = sys.getsizeof(result)
-                    
-                    # Create result summary based on method type
-                    result_data = {
-                        "action_key": action_key,
-                        "size_bytes": result_size,
-                        "method": mcp_method,
-                    }
-                    
-                    # Add method-specific result details
-                    if mcp_method == "readResource":
-                        # For resource reads, include content preview
-                        content_preview = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
-                        result_data["content_preview"] = content_preview
-                        result_data["resource_uri"] = params.get("uri", "unknown")
-                        
-                    elif mcp_method == "callTool":
-                        # For tool calls, include tool name and result type
-                        result_data["tool_name"] = params.get("name", "unknown")
-                        result_data["result_type"] = type(result).__name__
-                        # Include result preview if it's a string or dict
-                        if isinstance(result, (str, dict)):
-                            preview = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
-                            result_data["result_preview"] = preview
-                            
-                    elif mcp_method in ["listResources", "listTools"]:
-                        # For list operations, include count
-                        if isinstance(result, list):
-                            result_data["items_count"] = len(result)
-                            if result:
-                                result_data["first_item_preview"] = str(result[0])[:100] + "..." if len(str(result[0])) > 100 else str(result[0])
-                        elif hasattr(result, 'resources'):  # MCP response format
-                            result_data["items_count"] = len(result.resources)
-                        elif hasattr(result, 'tools'):  # MCP response format
-                            result_data["items_count"] = len(result.tools)
-                    
-                    self.logger.info(
-                        "MCP call result",
-                        event_type="mcp.result",
-                        data=result_data,
-                    )
+                # Add result metrics
+                import sys
+                result_size = sys.getsizeof(result)
+                
+                result_metrics = {
+                    "action_success": True,
+                    "result_size_bytes": result_size,
+                }
+                
+                if mcp_method == "callTool":
+                    result_metrics["tool_name"] = params.get("name", "unknown")
+                elif mcp_method in ["listResources", "listTools"] and isinstance(result, list):
+                    result_metrics["items_count"] = len(result)
+                
+                op.add_metrics(**result_metrics)
 
             except Exception as e:
                 error_msg = str(e)
@@ -838,8 +817,24 @@ class Agent:
                 logger.error(f"Error executing {action_label}: {error_msg}", exc_info=self.debug)
                 state.requires_replanning = True
                 state.execution_context["last_error"] = error_msg
+                
+                # Add error metrics
+                op.add_metrics(
+                    action_success=False,
+                    error_type=type(e).__name__,
+                    error_message=error_msg[:200]
+                )
 
         state.current_action_index += 1
+        
+        # Add action completion metrics to span
+        SpanMetrics.add(
+            last_action_index=state.current_action_index - 1,
+            last_action_method=mcp_method,
+            last_action_server=server_id,
+            actions_remaining=len(state.planned_actions) - state.current_action_index
+        )
+        
         return state
 
     async def _evaluate_results(self, state: AgentState) -> AgentState:
@@ -894,6 +889,7 @@ class Agent:
 
         return state
 
+    @traced_async()
     async def _replan_actions(self, state: AgentState) -> AgentState:
         """Replan actions based on execution errors."""
         logger.info("Replanning actions due to execution issues...")
@@ -905,6 +901,12 @@ class Agent:
             state.error = f"Failed after {state.max_replan_attempts} replanning attempts. Last error: {state.execution_context.get('last_error', 'Unknown error')}"
             state.requires_replanning = False
             state.planned_actions = state.planned_actions[: state.current_action_index]
+            
+            SpanMetrics.add(
+                replan_failed=True,
+                replan_count=state.replan_count,
+                final_error=state.error
+            )
             return state
 
         last_error = state.execution_context.get("last_error", "Unknown error")
@@ -1024,6 +1026,14 @@ class Agent:
                 logger.debug(
                     f"New Action {i + 1}: {action.get('server_id')}.{action.get('mcp_method')}({action.get('params', {})})"
                 )
+            
+            # Add replan metrics
+            SpanMetrics.add(
+                replan_success=True,
+                replan_count=state.replan_count,
+                new_actions_count=len(new_actions),
+                last_error_summary=last_error[:100]
+            )
 
         else:
             logger.warning(
@@ -1032,6 +1042,11 @@ class Agent:
             state.planned_actions = state.planned_actions[
                 : state.current_action_index
             ]  # Stop executing plan
+            
+            SpanMetrics.add(
+                replan_no_actions=True,
+                replan_count=state.replan_count
+            )
 
         # Reset replanning flags
         state.requires_replanning = False
@@ -1315,7 +1330,7 @@ class Agent:
 
     # --- Main method ---
 
-    @traced_async("agent.workflow", "agent.core", extract_args=True)
+    @traced_async()
     async def run(self, query: str, session_id: Optional[str] = None) -> AgentState:
         """Execute the complete agent workflow with observability."""
         logger.info(f"Starting agent run for query: '{query[:50]}...'")
@@ -1352,6 +1367,11 @@ class Agent:
                     session_id=definite_session_id,
                     response="I'm running in stateless mode without access to database. No history to clear.",
                 )
+            
+            SpanMetrics.add(
+                command="clear_history",
+                db_connected=self._db_connected
+            )
             return final_state
 
         if query.strip().lower() == "show history":
@@ -1363,6 +1383,12 @@ class Agent:
 
             final_state = AgentState(
                 query=query, session_id=definite_session_id, response=history_text
+            )
+            
+            SpanMetrics.add(
+                command="show_history",
+                history_count=len(self.current_history),
+                db_connected=self._db_connected
             )
             return final_state
 
@@ -1377,6 +1403,11 @@ class Agent:
             # If LLM is not connected, return a simple message
             if not self._llm_connected:
                 state.response = "I'm currently unable to process your request as my language model service is unavailable. Please try again later or contact support."
+                
+                SpanMetrics.add(
+                    workflow_aborted=True,
+                    abort_reason="llm_unavailable"
+                )
                 return state
 
             # Execute workflow
@@ -1406,6 +1437,11 @@ class Agent:
                 assistant_message = Message(role="assistant", content=state.response)
                 await self._save_message(definite_session_id, assistant_message)
 
+                SpanMetrics.add(
+                    workflow_mode="simple",
+                    response_length=len(state.response),
+                    has_tools=False
+                )
                 return state
 
             if not state.error:
@@ -1440,6 +1476,19 @@ class Agent:
                     definite_session_id, state.execution_context["assistant_message_to_save"]
                 )
 
+            # Add final workflow metrics
+            SpanMetrics.add(
+                workflow_mode="full",
+                workflow_success=not bool(state.error),
+                total_actions_planned=len(state.planned_actions),
+                total_actions_executed=state.current_action_index,
+                replan_count=state.replan_count,
+                response_length=len(state.response) if state.response else 0,
+                has_tools=self._has_tools,
+                db_connected=self._db_connected,
+                llm_connected=self._llm_connected
+            )
+
         except Exception as e:
             logger.error(f"Error during agent execution: {e}", exc_info=True)
             state.error = f"Agent execution failed: {e}"
@@ -1453,5 +1502,12 @@ class Agent:
                 role="assistant", content=f"Error: {state.error}\n{state.response or ''}"
             )
             await self._save_message(definite_session_id, error_message)
+
+            # Add error metrics
+            SpanMetrics.add(
+                workflow_error=str(e),
+                error_type=type(e).__name__,
+                workflow_stage="unknown"
+            )
 
         return state
