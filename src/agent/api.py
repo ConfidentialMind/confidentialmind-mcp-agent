@@ -13,14 +13,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from src.agent.agent import Agent
+from src.agent.agent import Agent, traced_async_generator
 from src.agent.connectors import ConnectorConfigManager
 from src.agent.conversation_manager import ConversationManager
 from src.agent.database import Database, DatabaseSettings
 from src.agent.llm import LLMConnector
 from src.agent.state import Message
 from src.agent.transport import TransportManager
-from confidentialmind_core import TraceContext
+from confidentialmind_core import TraceContext, copy_context
 from confidentialmind_core import get_logger, traced_async
 
 # Configure logging
@@ -338,7 +338,9 @@ async def logging_middleware(request: Request, call_next):
         )
         raise
     finally:
-        TraceContext.clear()
+        # Note: Don't clear TraceContext here as it breaks streaming traces
+        # The context var is per-request task; FastAPI/Starlette won't leak it across requests
+        pass
 
 
 # Add CORS middleware
@@ -379,7 +381,7 @@ def get_session_id(request: Request) -> str:
     return session_id
 
 
-@traced_async("agent.streaming.process", "agent.api")
+@traced_async_generator("agent.streaming.process", "agent.api")
 async def _stream_chat_completion(
     query: str, session_id: str, req: ChatCompletionRequest, components: AgentComponents
 ):
@@ -596,6 +598,7 @@ async def _create_stateless_completion(
         )
 
 
+@traced_async_generator("agent.streaming.stateless", "agent.api")
 async def _stream_stateless_completion(
     query: str,
     conversation_id: str,
