@@ -1,4 +1,6 @@
 import asyncio
+import functools
+import inspect
 import json
 import logging
 import os
@@ -8,6 +10,7 @@ import uuid
 from contextlib import AsyncExitStack
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from confidentialmind_core import SpanMetrics, get_logger, log_operation, traced_async
 from confidentialmind_core.config_manager import load_environment
 from fastmcp.exceptions import ClientError
 
@@ -16,9 +19,111 @@ from src.agent.database import Database
 from src.agent.llm import LLMConnector
 from src.agent.state import AgentState, Message
 from src.agent.transport import TransportManager
-from confidentialmind_core import get_logger, log_operation, traced_async, SpanMetrics
 
 logger = logging.getLogger(__name__)
+
+
+def traced_async_generator(
+    event_type: Optional[str] = None, 
+    logger_name: Optional[str] = None, 
+    extract_args: bool = True
+):
+    """
+    Decorator for tracing async generators with automatic span management.
+    
+    Args:
+        event_type: Event type (defaults to module.function)
+        logger_name: Logger name (defaults to module name)
+        extract_args: Whether to extract function arguments
+    """
+    def decorator(func):
+        nonlocal event_type, logger_name
+
+        if not event_type:
+            module_last = func.__module__.split('.')[-1]
+            event_type = f"{module_last}.{func.__name__}"
+
+        if not logger_name:
+            logger_name = "agent.core"
+
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            logger_instance = get_logger(logger_name)
+
+            # Create span for this operation
+            span_id = str(uuid.uuid4().hex[:16])
+            start_time = time.time()
+
+            # Extract function attributes
+            attributes = {}
+            if extract_args and len(args) > 1:  # Skip 'self'
+                attributes = {
+                    "query_preview": args[1][:50] + "..." if len(args[1]) > 50 else args[1],
+                    "session_id": args[2] if len(args) > 2 else None
+                }
+
+            # Log start event
+            logger_instance.info(
+                f"Starting {event_type}",
+                event_type=f"{event_type}.start",
+                span_id=span_id,
+                data=attributes,
+            )
+
+            try:
+                # Call the original async generator function
+                async_gen = func(*args, **kwargs)
+                
+                # Verify it's actually an async generator
+                if not inspect.isasyncgen(async_gen):
+                    raise TypeError(f"Function {func.__name__} did not return an async generator")
+
+                # Wrap the generator to track completion
+                chunk_count = 0
+                async for chunk in async_gen:
+                    chunk_count += 1
+                    yield chunk
+
+                # Log successful completion
+                duration_ms = (time.time() - start_time) * 1000
+                completion_data = attributes.copy()
+                completion_data.update({
+                    "chunks_yielded": chunk_count,
+                    "completed": True
+                })
+
+                logger_instance.info(
+                    f"Completed {event_type}",
+                    event_type=f"{event_type}.complete",
+                    span_id=span_id,
+                    duration_ms=duration_ms,
+                    success=True,
+                    data=completion_data,
+                )
+
+            except Exception as e:
+                # Log error
+                duration_ms = (time.time() - start_time) * 1000
+                error_data = attributes.copy()
+                error_data.update({
+                    "error_type": type(e).__name__,
+                    "completed": False
+                })
+
+                logger_instance.error(
+                    f"Failed {event_type}",
+                    event_type=f"{event_type}.complete",
+                    span_id=span_id,
+                    duration_ms=duration_ms,
+                    success=False,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    data=error_data,
+                )
+                raise
+
+        return wrapper
+    return decorator
 
 
 class Agent:
@@ -124,7 +229,7 @@ class Agent:
 
     # --- Streaming Support ---
 
-    @traced_async()
+    @traced_async_generator()
     async def run_streaming(
         self, query: str, session_id: Optional[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:

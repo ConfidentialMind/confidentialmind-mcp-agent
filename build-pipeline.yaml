@@ -28,9 +28,9 @@ spec:
     - name: src-path
       value: . # Root of the project
     - name: registry-host
-      value: confidentialmind.azurecr.io/main/services
+      value: confidentialmind.azurecr.io/henri/services
     - name: image-reference
-      value: mcp-agent:0.2.9
+      value: mcp-agent:0.2.10
     - name: service-name
       value: mcp-agent
     - name: values_file
