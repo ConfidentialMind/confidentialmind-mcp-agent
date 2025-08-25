@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from src.agent.agent import Agent, traced_async_generator
+from src.agent.agent import Agent
 from src.agent.connectors import ConnectorConfigManager
 from src.agent.conversation_manager import ConversationManager
 from src.agent.database import Database, DatabaseSettings
@@ -22,6 +22,7 @@ from src.agent.state import Message
 from src.agent.transport import TransportManager
 from confidentialmind_core import TraceContext, copy_context
 from confidentialmind_core import get_logger, traced_async
+from confidentialmind_core.decorators import traced_async_generator
 
 # Configure logging
 logger = logging.getLogger("fastmcp_agent.api")

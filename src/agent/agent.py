@@ -1,6 +1,4 @@
 import asyncio
-import functools
-import inspect
 import json
 import logging
 import os
@@ -10,8 +8,8 @@ import uuid
 from contextlib import AsyncExitStack
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from confidentialmind_core import SpanMetrics, get_logger, log_operation, traced_async, TraceContext, get_current_trace
-from confidentialmind_core.decorators import extract_function_attributes
+from confidentialmind_core import SpanMetrics, get_logger, log_operation, traced_async
+from confidentialmind_core.decorators import traced_async_generator
 from confidentialmind_core.config_manager import load_environment
 from fastmcp.exceptions import ClientError
 
@@ -22,143 +20,6 @@ from src.agent.state import AgentState, Message
 from src.agent.transport import TransportManager
 
 logger = logging.getLogger(__name__)
-
-
-def traced_async_generator(
-    event_type: Optional[str] = None, 
-    logger_name: Optional[str] = None, 
-    extract_args: bool = True
-):
-    """
-    Decorator for tracing async generators with automatic span management.
-    
-    Args:
-        event_type: Event type (defaults to module.function)
-        logger_name: Logger name (defaults to module name)
-        extract_args: Whether to extract function arguments
-    """
-    def decorator(func):
-        nonlocal event_type, logger_name
-
-        if not event_type:
-            module_last = func.__module__.split('.')[-1]
-            event_type = f"{module_last}.{func.__name__}"
-
-        if not logger_name:
-            # Use the same logic as SDK for logger name
-            module_parts = func.__module__.split(".")
-            if len(module_parts) >= 2:
-                if module_parts[0] in ('src', 'app', 'lib'):
-                    logger_name = '.'.join(module_parts[1:3]) if len(module_parts) > 2 else module_parts[1]
-                else:
-                    logger_name = '.'.join(module_parts[-2:])
-            else:
-                logger_name = module_parts[0] if module_parts else "default"
-
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            # Clear any previous span metrics
-            SpanMetrics.clear()
-            
-            logger_instance = get_logger(logger_name)
-
-            # Create child span for this operation
-            trace = get_current_trace()
-            span_id = str(uuid.uuid4().hex[:16])
-            parent_span_id = trace.span_id if trace else None
-
-            # Extract function attributes using SDK function
-            attributes = {}
-            if extract_args:
-                attributes = extract_function_attributes(func, args, kwargs)
-
-            # Set current span
-            old_span = None
-            if trace:
-                old_span = trace.span_id
-                TraceContext.set_span(span_id, parent_span_id)
-
-            start_time = time.time()
-
-            # Log start event
-            logger_instance.info(
-                f"Starting {event_type}",
-                event_type=f"{event_type}.start",
-                span_id=span_id,
-                parent_span_id=parent_span_id,
-                data=attributes,
-            )
-
-            try:
-                # Call the original async generator function
-                async_gen = func(*args, **kwargs)
-                
-                # Verify it's actually an async generator
-                if not inspect.isasyncgen(async_gen):
-                    raise TypeError(f"Function {func.__name__} did not return an async generator")
-
-                # Wrap the generator to track completion
-                chunk_count = 0
-                async for chunk in async_gen:
-                    chunk_count += 1
-                    yield chunk
-
-                # Get accumulated metrics
-                span_metrics = SpanMetrics.get()
-                
-                # Combine original attributes with accumulated metrics
-                complete_data = attributes.copy() if extract_args else {}
-                complete_data.update(span_metrics)
-                complete_data.update({
-                    "chunks_yielded": chunk_count,
-                    "stream_completed": True
-                })
-
-                # Log successful completion
-                duration_ms = (time.time() - start_time) * 1000
-                logger_instance.info(
-                    f"Completed {event_type}",
-                    event_type=f"{event_type}.complete",
-                    span_id=span_id,
-                    parent_span_id=parent_span_id,
-                    duration_ms=duration_ms,
-                    success=True,
-                    data=complete_data,
-                )
-
-            except Exception as e:
-                # Get any metrics that were accumulated before the error
-                span_metrics = SpanMetrics.get()
-                error_data = attributes.copy() if extract_args else {}
-                error_data.update(span_metrics)
-                error_data.update({
-                    "stream_completed": False,
-                    "error_during_streaming": True
-                })
-                
-                # Log error
-                duration_ms = (time.time() - start_time) * 1000
-                logger_instance.error(
-                    f"Failed {event_type}",
-                    event_type=f"{event_type}.complete",
-                    span_id=span_id,
-                    parent_span_id=parent_span_id,
-                    duration_ms=duration_ms,
-                    success=False,
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    data=error_data,
-                )
-                raise
-
-            finally:
-                # Restore parent span and clear metrics
-                if trace and old_span:
-                    TraceContext.set_span(old_span, trace.parent_span_id)
-                SpanMetrics.clear()
-
-        return wrapper
-    return decorator
 
 
 class Agent:
