@@ -9,7 +9,7 @@ dependencies = [
   "asyncpg>=0.30.0",
   "backoff>=2.2.1",
   "black>=25.1.0",
-  "confidentialmind-core==0.1.18",
+  "confidentialmind-core @ https://test-files.pythonhosted.org/packages/d4/ed/bdae0bb559898798bf8962a5a561ceff6d90a2b6e172cd8442c42ed3e4a3/confidentialmind_core-0.2.0-py3-none-any.whl",
   "fastapi>=0.115.12",
   "fastmcp>=2.4.0",
   "greenlet>=3.1.1",

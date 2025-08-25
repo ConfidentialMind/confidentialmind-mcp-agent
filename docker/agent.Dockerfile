@@ -20,15 +20,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY pyproject.toml .
 COPY src/ ./src/
 
-# Copy local SDK POC (includes our tracing module)
-COPY sdk/confidentialmind_core/ ./sdk/confidentialmind_core/
-
-# Install Python dependencies first (except confidentialmind-core)
-# We'll install our local SDK version after
+# Install Python dependencies
 RUN uv pip install --no-cache . 
-
-# Now force reinstall our local SDK over the PyPI version
-RUN pip install --force-reinstall --no-deps ./sdk/confidentialmind_core/
 
 # --- Runtime Stage ---
 FROM python:3.10-slim
