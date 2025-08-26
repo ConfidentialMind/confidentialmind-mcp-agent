@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir \
   pydantic>=2.11.0 \
   pydantic-settings>=2.8.1 \
   backoff>=2.2.1 \
-  confidentialmind-core==0.1.8 \
+  confidentialmind-core==0.2.1 \
   structlog>=25.3.0 \
   python-dotenv>=1.1.0
 

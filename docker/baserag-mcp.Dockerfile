@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir \
   aiohttp>=3.11.18 \
   pydantic>=2.11.0 \
   pydantic-settings>=2.8.1 \
-  confidentialmind-core==0.1.8 \
+  confidentialmind-core==0.2.1 \
   uvicorn>=0.34.0 \
   starlette>=0.27.0 \
   structlog>=25.3.0 \
