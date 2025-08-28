@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import uuid
 from contextlib import AsyncExitStack
 from datetime import datetime
@@ -19,7 +20,9 @@ from src.agent.database import Database, DatabaseSettings
 from src.agent.llm import LLMConnector
 from src.agent.state import Message
 from src.agent.transport import TransportManager
-from src.shared.logging import TraceContext, get_logger, traced_async
+from confidentialmind_core import TraceContext, copy_context
+from confidentialmind_core import get_logger, traced_async
+from confidentialmind_core.decorators import traced_async_generator
 
 # Configure logging
 logger = logging.getLogger("fastmcp_agent.api")
@@ -267,6 +270,80 @@ app = FastAPI(
 components = AgentComponents()
 
 
+# Add tracing middleware
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    """FastAPI middleware for request/response logging and tracing."""
+    # Initialize trace context from request headers
+    session_id = request.headers.get("X-Session-ID", str(uuid.uuid4()))
+    api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
+
+    trace_info = TraceContext.initialize(
+        session_id=session_id, api_key=api_key, origin_service="mcp-agent"
+    )
+
+    start_time = time.time()
+
+    # Log request start
+    structlog_logger.info(
+        "API request started",
+        event_type="agent.api.request.start",
+        data={
+            "method": request.method,
+            "path": str(request.url.path),
+            "query_params": dict(request.query_params),
+            "user_agent": request.headers.get("User-Agent", ""),
+            "content_type": request.headers.get("Content-Type", ""),
+        },
+        method=request.method,
+        path=str(request.url.path),
+    )
+
+    try:
+        response = await call_next(request)
+        duration_ms = (time.time() - start_time) * 1000
+
+        structlog_logger.info(
+            "API request completed",
+            event_type="agent.api.request.complete",
+            data={
+                "method": request.method,
+                "path": str(request.url.path),
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+                "success": 200 <= response.status_code < 400,
+            },
+            method=request.method,
+            path=str(request.url.path),
+            duration_ms=duration_ms,
+        )
+
+        return response
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+
+        structlog_logger.error(
+            "API request failed",
+            event_type="agent.api.request.error", 
+            data={
+                "method": request.method,
+                "path": str(request.url.path),
+                "duration_ms": duration_ms,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "success": False,
+            },
+            method=request.method,
+            path=str(request.url.path),
+            duration_ms=duration_ms,
+        )
+        raise
+    finally:
+        # Note: Don't clear TraceContext here as it breaks streaming traces
+        # The context var is per-request task; FastAPI/Starlette won't leak it across requests
+        pass
+
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -305,7 +382,7 @@ def get_session_id(request: Request) -> str:
     return session_id
 
 
-@traced_async("agent.streaming.process", "agent.api")
+@traced_async_generator("agent.streaming.process", "agent.api")
 async def _stream_chat_completion(
     query: str, session_id: str, req: ChatCompletionRequest, components: AgentComponents
 ):
@@ -522,6 +599,7 @@ async def _create_stateless_completion(
         )
 
 
+@traced_async_generator("agent.streaming.stateless", "agent.api")
 async def _stream_stateless_completion(
     query: str,
     conversation_id: str,
@@ -869,74 +947,28 @@ async def create_chat_completion(
 ):
     """OpenAI-compatible chat completion endpoint with tracing."""
 
-    # Initialize trace context at request entry
+    # Get session ID for conversation management (trace context handled by middleware)
     session_id = get_session_id(request)
-    api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
 
-    trace_info = TraceContext.initialize(
-        session_id=session_id, api_key=api_key, origin_service="agent-api"
-    )
+    # Detect mode based on session ID presence
+    # If session_id is a UUID that wasn't in the request, it's auto-generated
+    has_explicit_session = False
+    if request.headers.get("X-Session-ID") or request.cookies.get("session_id"):
+        has_explicit_session = True
 
-    # Log request start
-    structlog_logger.info(
-        "Processing chat completion request",
-        event_type="agent.request.start",
-        data={
-            "endpoint": "/v1/chat/completions",
-            "model": req.model,
-            "streaming": req.stream,
-            "message_count": len(req.messages),
-            "has_explicit_session": bool(
-                request.headers.get("X-Session-ID") or request.cookies.get("session_id")
-            ),
-        },
-    )
+    if has_explicit_session:
+        # Stateful mode - use existing logic
+        result = await _process_stateful_request(request, session_id, req, components)
+    else:
+        # Stateless mode - use conversation fingerprinting
+        result = await _process_stateless_request(req, components)
 
-    try:
-        # Detect mode based on session ID presence
-        # If session_id is a UUID that wasn't in the request, it's auto-generated
-        has_explicit_session = False
-        if request.headers.get("X-Session-ID") or request.cookies.get("session_id"):
-            has_explicit_session = True
+    # Add trace ID to response headers if possible
+    current_trace = TraceContext.get()
+    if hasattr(result, "headers") and current_trace:
+        result.headers["X-Trace-ID"] = current_trace.trace_id
 
-        if has_explicit_session:
-            # Stateful mode - use existing logic
-            result = await _process_stateful_request(request, session_id, req, components)
-        else:
-            # Stateless mode - use conversation fingerprinting
-            result = await _process_stateless_request(req, components)
-
-        # Log successful completion
-        structlog_logger.info(
-            "Chat completion request completed successfully",
-            event_type="agent.request.complete",
-            success=True,
-            data={
-                "endpoint": "/v1/chat/completions",
-                "response_type": "streaming" if req.stream else "non-streaming",
-            },
-        )
-
-        # Add trace ID to response headers if possible
-        if hasattr(result, "headers"):
-            result.headers["X-Trace-ID"] = trace_info.trace_id
-
-        return result
-
-    except Exception as e:
-        # Log error
-        structlog_logger.error(
-            "Chat completion request failed",
-            event_type="agent.request.complete",
-            success=False,
-            error=str(e),
-            error_type=type(e).__name__,
-            data={"endpoint": "/v1/chat/completions"},
-        )
-        raise
-    finally:
-        # Clear trace context
-        TraceContext.clear()
+    return result
 
 
 @app.get("/health")

@@ -305,7 +305,7 @@ To modify server settings:
 - Add custom observability events by using the structured logger:
 
 ```python
-from src.shared.logging import get_logger
+from confidentialmind_core import get_logger
 
 structlog_logger = get_logger("postgres.mcp")
 

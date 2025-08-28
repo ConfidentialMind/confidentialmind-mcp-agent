@@ -1,7 +1,7 @@
-import logging
 import os
 from typing import Dict, Optional, Tuple
 
+from confidentialmind_core import get_logger
 from confidentialmind_core.config_manager import (
     ArrayConnectorSchema,
     ConfigManager,
@@ -11,7 +11,7 @@ from confidentialmind_core.config_manager import (
 )
 from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+logger = get_logger("agent.connectors")
 
 
 class AgentConfig(BaseModel):
@@ -32,7 +32,9 @@ class ConnectorConfigManager:
             os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
         )
         logger.info(
-            f"ConnectorConfigManager: Initializing in {'stack deployment' if self.is_stack_deployment else 'local development'} mode"
+            f"ConnectorConfigManager: Initializing in {'stack deployment' if self.is_stack_deployment else 'local development'} mode",
+            _exclude_from_trace=True,
+            deployment_mode="stack" if self.is_stack_deployment else "local"
         )
         self._background_tasks = []
 
@@ -44,13 +46,13 @@ class ConnectorConfigManager:
             register_connectors: Whether to register connectors with ConfigManager
         """
         if self.initialized:
-            logger.debug("ConnectorConfigManager: Already initialized")
+            logger.debug("ConnectorConfigManager: Already initialized", _exclude_from_trace=True)
             return
 
         if register_connectors and self.is_stack_deployment:
             # Register connectors with the ConfigManager in stack deployment mode
             try:
-                logger.info("ConnectorConfigManager: Registering connectors with ConfigManager")
+                logger.info("ConnectorConfigManager: Registering connectors with ConfigManager", _exclude_from_trace=True)
                 config_manager = ConfigManager()
 
                 # Register connectors that the agent needs
@@ -86,10 +88,17 @@ class ConnectorConfigManager:
                 )
 
                 logger.info(
-                    f"ConnectorConfigManager: Registered {len(connectors)} connectors and {len(array_connectors)} array connectors"
+                    f"ConnectorConfigManager: Registered {len(connectors)} connectors and {len(array_connectors)} array connectors",
+                    _exclude_from_trace=True,
+                    connectors_count=len(connectors),
+                    array_connectors_count=len(array_connectors)
                 )
             except Exception as e:
-                logger.error(f"ConnectorConfigManager: Error registering connectors: {e}")
+                logger.error(
+                    f"ConnectorConfigManager: Error registering connectors: {e}",
+                    _exclude_from_trace=True,
+                    error=str(e)
+                )
                 # Continue without raising - allow app to initialize without connectors
 
         self.initialized = True
@@ -170,7 +179,8 @@ class ConnectorConfigManager:
 
             if not servers:
                 logger.warning(
-                    "ConnectorConfigManager: No MCP servers found in environment variables"
+                    "ConnectorConfigManager: No MCP servers found in environment variables",
+                    _exclude_from_trace=True
                 )
 
             return servers
@@ -199,12 +209,24 @@ class ConnectorConfigManager:
 
                 if servers:
                     logger.info(
-                        f"ConnectorConfigManager: Retrieved {len(servers)} MCP server URLs from stack"
+                        f"ConnectorConfigManager: Retrieved {len(servers)} MCP server URLs from stack",
+                        _exclude_from_trace=True,
+                        servers_count=len(servers),
+                        config_id=config_id
                     )
                     return servers
                 else:
-                    logger.warning(f"ConnectorConfigManager: No MCP servers found for {config_id}")
+                    logger.warning(
+                        f"ConnectorConfigManager: No MCP servers found for {config_id}",
+                        _exclude_from_trace=True,
+                        config_id=config_id
+                    )
                     return {}
             except Exception as e:
-                logger.error(f"ConnectorConfigManager: Error fetching MCP servers: {e}")
+                logger.error(
+                    f"ConnectorConfigManager: Error fetching MCP servers: {e}",
+                    _exclude_from_trace=True,
+                    error=str(e),
+                    config_id=config_id
+                )
                 return {}

@@ -52,7 +52,7 @@ CONFIDENTIAL_MIND_LOCAL_CONFIG=false  # Enable stack deployment mode
 The logging system is automatically configured when any shared logging component is imported:
 
 ```python
-from src.shared.logging import get_logger, traced_async
+from confidentialmind_core import get_logger, traced_async
 
 # Logger is automatically configured with structlog
 logger = get_logger("my.component")
@@ -63,7 +63,7 @@ logger = get_logger("my.component")
 ### Basic Structured Logging
 
 ```python
-from src.shared.logging import get_logger
+from confidentialmind_core import get_logger
 
 logger = get_logger("agent.core")
 
@@ -88,7 +88,7 @@ logger.info(
 #### Initializing Trace Context
 
 ```python
-from src.shared.logging import TraceContext
+from confidentialmind_core import TraceContext
 
 # Initialize trace context (typically at request entry)
 trace_info = TraceContext.initialize(
@@ -104,7 +104,7 @@ trace_info = TraceContext.from_headers(request.headers, api_key="key")
 #### Function Tracing with Decorators
 
 ```python
-from src.shared.logging import traced_async, traced
+from confidentialmind_core import traced_async, traced
 
 # Async function tracing
 @traced_async("agent.workflow", "agent.core")
@@ -128,7 +128,7 @@ async def call_mcp_tool(server_id: str, tool_name: str, args: dict):
 #### Manual Operation Logging
 
 ```python
-from src.shared.logging import log_operation
+from confidentialmind_core import log_operation
 
 # Context manager for operation timing
 with log_operation(
@@ -169,7 +169,7 @@ async def chat_completion(request: Request):
 MCP servers automatically extract and use trace context:
 
 ```python
-from src.shared.logging import TraceContext, get_logger
+from confidentialmind_core import TraceContext, get_logger
 
 structlog_logger = get_logger("postgres.mcp")
 
@@ -559,7 +559,7 @@ logger.info("Special condition detected", event_type="service.condition.detected
 2. **Check Trace Propagation**
 
    ```python
-   from src.shared.logging import get_current_trace
+   from confidentialmind_core import get_current_trace
 
    trace = get_current_trace()
    if trace:
@@ -585,7 +585,7 @@ logger.info("Special condition detected", event_type="service.condition.detected
 1. **Import shared logging**
 
    ```python
-   from src.shared.logging import get_logger, traced_async
+   from confidentialmind_core import get_logger, traced_async
    ```
 
 2. **Replace existing loggers**
@@ -596,7 +596,7 @@ logger.info("Special condition detected", event_type="service.condition.detected
    logger = logging.getLogger(__name__)
 
    # New
-   from src.shared.logging import get_logger
+   from confidentialmind_core import get_logger
    logger = get_logger("component.name")
    ```
 

@@ -11,8 +11,8 @@ from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from src.shared.logging.config import get_logger
-from src.shared.logging.trace_context import TraceContext
+from confidentialmind_core import get_logger
+from confidentialmind_core import TraceContext
 
 from .connection_manager import ConnectionManager
 from .db import (

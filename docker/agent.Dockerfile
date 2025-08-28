@@ -20,9 +20,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY pyproject.toml .
 COPY src/ ./src/
 
-# Install Python dependencies into the virtual environment using uv
-# This installs the project defined in pyproject.toml and its dependencies
-RUN uv pip install --no-cache .
+# Install Python dependencies
+RUN uv pip install --no-cache . 
 
 # --- Runtime Stage ---
 FROM python:3.10-slim
