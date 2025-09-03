@@ -42,7 +42,7 @@ spec:
     - name: git-repo
       value: git@github.com:ConfidentialMind/confidentialmind-mcp-agent.git
     - name: branch
-      value: sdk-tracing-poc
+      value: main
     - name: stack-branch
       value: dev
     - name: skip-deploy
