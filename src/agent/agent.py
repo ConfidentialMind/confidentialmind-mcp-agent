@@ -9,8 +9,8 @@ from contextlib import AsyncExitStack
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from confidentialmind_core import SpanMetrics, get_logger, log_operation, traced_async
-from confidentialmind_core.decorators import traced_async_generator
 from confidentialmind_core.config_manager import load_environment
+from confidentialmind_core.decorators import traced_async_generator
 from fastmcp.exceptions import ClientError
 
 from src.agent.connectors import ConnectorConfigManager
@@ -65,11 +65,14 @@ class Agent:
             os.environ.get("CONFIDENTIAL_MIND_LOCAL_CONFIG", "False").lower() != "true"
         )
 
+        # Check if retry/replanning is disabled
+        self._no_retry = os.environ.get("NO_RETRY", "false").lower() == "true"
+
     async def initialize(self) -> bool:
         """Initialize agent components."""
         if self._initialized:
             return True
-            
+
         self.logger.info("Initializing agent")
 
         # Check connection status
@@ -113,7 +116,9 @@ class Agent:
                 self._exit_stack.push_async_callback(client.__aexit__, None, None, None)
                 self.logger.debug("Successfully connected to MCP server", server_id=server_id)
             except Exception as e:
-                self.logger.error("Failed to connect to MCP server", server_id=server_id, error=str(e))
+                self.logger.error(
+                    "Failed to connect to MCP server", server_id=server_id, error=str(e)
+                )
                 # Continue with other servers
 
         self._initialized = True
@@ -135,7 +140,10 @@ class Agent:
         Yields:
             Dict containing workflow updates and final streaming response
         """
-        self.logger.info("Starting streaming agent run", query_preview=query[:50] + "..." if len(query) > 50 else query)
+        self.logger.info(
+            "Starting streaming agent run",
+            query_preview=query[:50] + "..." if len(query) > 50 else query,
+        )
 
         stage_timings = {}
         stage_start = time.time()
@@ -152,7 +160,7 @@ class Agent:
                 total_actions_executed=state.current_action_index,
                 has_tools=self._has_tools,
                 db_connected=self._db_connected,
-                workflow_duration_ms=stage_timings["workflow_stages"]
+                workflow_duration_ms=stage_timings["workflow_stages"],
             )
 
             # If there was an error in the workflow, yield it and return
@@ -193,19 +201,21 @@ class Agent:
                 stream_chunks=chunk_count,
                 total_response_length=len(full_response),
                 streaming_duration_ms=stage_timings["streaming"],
-                total_duration_ms=sum(stage_timings.values())
+                total_duration_ms=sum(stage_timings.values()),
             )
 
         except Exception as e:
             logger.error(f"Error during streaming agent execution: {e}", exc_info=True)
-            
+
             # Add error metrics
             SpanMetrics.add(
                 streaming_error=str(e),
                 error_stage="streaming",
-                session_type="conversation" if session_id and session_id.startswith("conv_") else "session"
+                session_type="conversation"
+                if session_id and session_id.startswith("conv_")
+                else "session",
             )
-            
+
             yield {
                 "type": "error",
                 "error": str(e),
@@ -301,7 +311,12 @@ class Agent:
                         break
 
                     if state.requires_replanning:
-                        state = await self._replan_actions(state)
+                        if self._no_retry:
+                            # NO_RETRY is enabled, skip replanning and break
+                            logger.info("Replanning disabled (NO_RETRY=true), stopping execution")
+                            break
+                        else:
+                            state = await self._replan_actions(state)
                     elif state.error:
                         break
 
@@ -420,13 +435,13 @@ class Agent:
             state.execution_context["available_resources"] = []
             state.execution_context["server_ids"] = []
             self._has_tools = False
-            
+
             # Add metrics for the complete log
             SpanMetrics.add(
                 tools_discovered=0,
                 resources_discovered=0,
                 servers_connected=0,
-                skipped_reason="no_clients"
+                skipped_reason="no_clients",
             )
             return state
 
@@ -502,7 +517,7 @@ class Agent:
                 tools_discovered=len(state.execution_context.get("available_tools", [])),
                 resources_discovered=len(state.execution_context.get("available_resources", [])),
                 servers_connected=len(state.execution_context.get("server_ids", [])),
-                server_ids=state.execution_context.get("server_ids", [])
+                server_ids=state.execution_context.get("server_ids", []),
             )
 
             return state
@@ -510,14 +525,14 @@ class Agent:
         except Exception as e:
             state.error = f"Failed to initialize context: {str(e)}"
             logger.error(f"Error in initialize_context: {e}", exc_info=True)
-            
+
             # Add error metrics
             SpanMetrics.add(
                 initialization_error=str(e),
                 partial_tools=len(state.execution_context.get("available_tools", [])),
-                partial_resources=len(state.execution_context.get("available_resources", []))
+                partial_resources=len(state.execution_context.get("available_resources", [])),
             )
-            
+
             return state
 
     @traced_async()
@@ -629,17 +644,17 @@ class Agent:
                     "purpose": "parse_query",
                     "model": "cm-llm",
                     "query_length": len(state.query),
-                }
+                },
             ) as op:
                 response = await self.llm.generate(prompt)
                 parsed_response = self._parse_json_response(response)
-                
+
                 # Add metrics to the operation
                 op.add_metrics(
                     response_length=len(response),
-                    actions_planned=len(parsed_response.get("actions", []))
+                    actions_planned=len(parsed_response.get("actions", [])),
                 )
-                
+
                 logger.debug("Received and parsed LLM planning response")
 
             # Extract planning information
@@ -675,7 +690,7 @@ class Agent:
                 actions_planned=len(state.planned_actions),
                 needs_more_info=state.needs_more_info,
                 thought_summary=thought[:100] if thought else None,
-                plan_summary=plan[:100] if plan else None
+                plan_summary=plan[:100] if plan else None,
             )
 
             return state
@@ -683,13 +698,10 @@ class Agent:
         except Exception as e:
             state.error = f"Failed to parse query: {str(e)}"
             logger.error(f"Error in parse_query: {e}", exc_info=True)
-            
+
             # Add error metrics
-            SpanMetrics.add(
-                parse_error=str(e),
-                partial_actions=len(state.planned_actions)
-            )
-            
+            SpanMetrics.add(parse_error=str(e), partial_actions=len(state.planned_actions))
+
             return state
 
     @traced_async()
@@ -711,11 +723,8 @@ class Agent:
             state.mcp_results[action_key] = {"error": error_msg}
             state.current_action_index += 1
             state.error = error_msg
-            
-            SpanMetrics.add(
-                action_error=error_msg,
-                action_index=state.current_action_index
-            )
+
+            SpanMetrics.add(action_error=error_msg, action_index=state.current_action_index)
             return state
 
         # Get the MCP client
@@ -724,11 +733,11 @@ class Agent:
             state.mcp_results[action_key] = {"error": error_msg}
             state.current_action_index += 1
             state.error = error_msg
-            
+
             SpanMetrics.add(
                 action_error=error_msg,
                 action_index=state.current_action_index,
-                missing_client=server_id
+                missing_client=server_id,
             )
             return state
 
@@ -746,7 +755,7 @@ class Agent:
             "action_index": state.current_action_index,
             "total_actions": len(state.planned_actions),
         }
-        
+
         # Add method-specific parameters for better tracing
         if mcp_method == "readResource" and "uri" in params:
             log_data["resource_uri"] = params["uri"]
@@ -788,18 +797,19 @@ class Agent:
 
                 # Add result metrics
                 import sys
+
                 result_size = sys.getsizeof(result)
-                
+
                 result_metrics = {
                     "action_success": True,
                     "result_size_bytes": result_size,
                 }
-                
+
                 if mcp_method == "callTool":
                     result_metrics["tool_name"] = params.get("name", "unknown")
                 elif mcp_method in ["listResources", "listTools"] and isinstance(result, list):
                     result_metrics["items_count"] = len(result)
-                
+
                 op.add_metrics(**result_metrics)
 
             except Exception as e:
@@ -818,24 +828,22 @@ class Agent:
                 logger.error(f"Error executing {action_label}: {error_msg}", exc_info=self.debug)
                 state.requires_replanning = True
                 state.execution_context["last_error"] = error_msg
-                
+
                 # Add error metrics
                 op.add_metrics(
-                    action_success=False,
-                    error_type=type(e).__name__,
-                    error_message=error_msg[:200]
+                    action_success=False, error_type=type(e).__name__, error_message=error_msg[:200]
                 )
 
         state.current_action_index += 1
-        
+
         # Add action completion metrics to span
         SpanMetrics.add(
             last_action_index=state.current_action_index - 1,
             last_action_method=mcp_method,
             last_action_server=server_id,
-            actions_remaining=len(state.planned_actions) - state.current_action_index
+            actions_remaining=len(state.planned_actions) - state.current_action_index,
         )
-        
+
         return state
 
     async def _evaluate_results(self, state: AgentState) -> AgentState:
@@ -902,11 +910,9 @@ class Agent:
             state.error = f"Failed after {state.max_replan_attempts} replanning attempts. Last error: {state.execution_context.get('last_error', 'Unknown error')}"
             state.requires_replanning = False
             state.planned_actions = state.planned_actions[: state.current_action_index]
-            
+
             SpanMetrics.add(
-                replan_failed=True,
-                replan_count=state.replan_count,
-                final_error=state.error
+                replan_failed=True, replan_count=state.replan_count, final_error=state.error
             )
             return state
 
@@ -1027,13 +1033,13 @@ class Agent:
                 logger.debug(
                     f"New Action {i + 1}: {action.get('server_id')}.{action.get('mcp_method')}({action.get('params', {})})"
                 )
-            
+
             # Add replan metrics
             SpanMetrics.add(
                 replan_success=True,
                 replan_count=state.replan_count,
                 new_actions_count=len(new_actions),
-                last_error_summary=last_error[:100]
+                last_error_summary=last_error[:100],
             )
 
         else:
@@ -1043,11 +1049,8 @@ class Agent:
             state.planned_actions = state.planned_actions[
                 : state.current_action_index
             ]  # Stop executing plan
-            
-            SpanMetrics.add(
-                replan_no_actions=True,
-                replan_count=state.replan_count
-            )
+
+            SpanMetrics.add(replan_no_actions=True, replan_count=state.replan_count)
 
         # Reset replanning flags
         state.requires_replanning = False
@@ -1368,11 +1371,8 @@ class Agent:
                     session_id=definite_session_id,
                     response="I'm running in stateless mode without access to database. No history to clear.",
                 )
-            
-            SpanMetrics.add(
-                command="clear_history",
-                db_connected=self._db_connected
-            )
+
+            SpanMetrics.add(command="clear_history", db_connected=self._db_connected)
             return final_state
 
         if query.strip().lower() == "show history":
@@ -1385,11 +1385,11 @@ class Agent:
             final_state = AgentState(
                 query=query, session_id=definite_session_id, response=history_text
             )
-            
+
             SpanMetrics.add(
                 command="show_history",
                 history_count=len(self.current_history),
-                db_connected=self._db_connected
+                db_connected=self._db_connected,
             )
             return final_state
 
@@ -1404,11 +1404,8 @@ class Agent:
             # If LLM is not connected, return a simple message
             if not self._llm_connected:
                 state.response = "I'm currently unable to process your request as my language model service is unavailable. Please try again later or contact support."
-                
-                SpanMetrics.add(
-                    workflow_aborted=True,
-                    abort_reason="llm_unavailable"
-                )
+
+                SpanMetrics.add(workflow_aborted=True, abort_reason="llm_unavailable")
                 return state
 
             # Execute workflow
@@ -1439,9 +1436,7 @@ class Agent:
                 await self._save_message(definite_session_id, assistant_message)
 
                 SpanMetrics.add(
-                    workflow_mode="simple",
-                    response_length=len(state.response),
-                    has_tools=False
+                    workflow_mode="simple", response_length=len(state.response), has_tools=False
                 )
                 return state
 
@@ -1464,7 +1459,14 @@ class Agent:
                             break
 
                         if state.requires_replanning:
-                            state = await self._replan_actions(state)
+                            if self._no_retry:
+                                # NO_RETRY is enabled, skip replanning and break
+                                logger.info(
+                                    "Replanning disabled (NO_RETRY=true), stopping execution"
+                                )
+                                break
+                            else:
+                                state = await self._replan_actions(state)
                         elif state.error:
                             break
 
@@ -1487,7 +1489,7 @@ class Agent:
                 response_length=len(state.response) if state.response else 0,
                 has_tools=self._has_tools,
                 db_connected=self._db_connected,
-                llm_connected=self._llm_connected
+                llm_connected=self._llm_connected,
             )
 
         except Exception as e:
@@ -1506,9 +1508,7 @@ class Agent:
 
             # Add error metrics
             SpanMetrics.add(
-                workflow_error=str(e),
-                error_type=type(e).__name__,
-                workflow_stage="unknown"
+                workflow_error=str(e), error_type=type(e).__name__, workflow_stage="unknown"
             )
 
         return state

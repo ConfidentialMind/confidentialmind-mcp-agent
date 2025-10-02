@@ -11,7 +11,7 @@ import typer
 from confidentialmind_core import get_logger
 from confidentialmind_core.config_manager import load_environment
 
-from agent.connectors import ConnectorConfigManager
+from src.agent.connectors import ConnectorConfigManager
 from src.agent.agent import Agent
 from src.agent.database import Database, DatabaseSettings, fetch_db_url
 from src.agent.llm import LLMConnector
@@ -198,11 +198,13 @@ def setup_logging(debug: bool):
     """Set up logging with the appropriate level."""
     # Set DEBUG environment variable for SDK structured logging
     import os
+
     os.environ["DEBUG"] = "true" if debug else "false"
-    
+
     # The SDK logging is auto-configured on import, but we can force reconfiguration
     # if needed by reimporting or calling configure functions directly
     from confidentialmind_core.logging import configure_structlog, configure_python_logging
+
     configure_structlog()
     configure_python_logging()
 
