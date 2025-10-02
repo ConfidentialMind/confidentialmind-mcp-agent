@@ -120,6 +120,7 @@ In stack deployment mode:
 - `LLM_CONFIG_ID`: LLM service config ID (default: LLM)
 - `CONFIDENTIAL_MIND_LOCAL_CONFIG`: Set to "False" for stack deployment mode
 - `DEBUG`: Set to "true" for human-readable logs in development
+- `NO_RETRY`: Set to "true" to disable automatic replanning on action failures (default: false)
 
 ### Config File
 
@@ -362,6 +363,7 @@ The agent follows a multi-stage workflow for processing queries:
    - Use LLM to generate a revised plan based on errors
    - Adjust subsequent actions to recover from failures
    - Create new approach to solve the original intent
+   - Can be disabled by setting `NO_RETRY=true` environment variable
 
 6. **Generate Response**:
    - Create a coherent response from all gathered information
@@ -494,6 +496,7 @@ The agent includes several resilience features:
 - **Connection Retries**: Automatic reconnection with exponential backoff
 - **Background Polling**: Continuous polling for URL changes in stack mode
 - **Graceful Degradation**: Operation with partial service availability
-- **Error Recovery**: Replanning logic to handle action failures
+- **Error Recovery**: Replanning logic to handle action failures (up to 5 retry attempts by default)
+  - Can be disabled with `NO_RETRY=true` to fail fast without retries
 - **Stateless Fallback**: Can operate without database connection if needed
 - **Comprehensive Monitoring**: Full observability for troubleshooting and performance analysis
