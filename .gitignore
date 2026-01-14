@@ -2,7 +2,7 @@ python*/
 __pycache__/
 .pytest_cache/
 .git/
-.github/
+# .github/
 .ruff_cache/
 .venv/
 .env
