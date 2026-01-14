@@ -2,15 +2,10 @@ python*/
 __pycache__/
 .pytest_cache/
 .git/
-# .github/
 .ruff_cache/
 .venv/
 .env
 *.egg-info/
 *.egg
 **/.DS_Store
-
-agent_instructions/
-agent_references/
-agent_prompts/
 .claude/

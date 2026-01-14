@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "canopywave-maple": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "canopywave-maple",
+      "options": {
+        "baseURL": "{env:MAPLE_BASE_URL}",
+        "apiKey": "{env:MAPLE_API_KEY}"
+      },
+      "models": {
+        "z-ai/glm-4.7": {
+          "name": "z-ai/glm-4.7"
+        }
+      }
+    }
+  }
+}
