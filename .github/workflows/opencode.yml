@@ -6,27 +6,50 @@ on:
   pull_request_review_comment:
     types: [created]
 
+permissions: {}
+
 jobs:
-  opencode:
+  oc_plan:
     if: |
       contains(github.event.comment.body, '/oc') ||
       contains(github.event.comment.body, '/opencode')
-
     runs-on: ubuntu-latest
-
+    # Minimal for the OpenCode GitHub App flow
     permissions:
       id-token: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - name: Run OpenCode
+      - name: Run OpenCode (review-only)
         uses: anomalyco/opencode/github@latest
         env:
           MAPLE_API_KEY: ${{ secrets.MAPLE_API_KEY }}
           MAPLE_BASE_URL: ${{ vars.MAPLE_BASE_URL }}
         with:
-          model: canopywave-maple/z-ai/glm-4.7
+          model: maple/z-ai/glm-4.7
+          agent: plan # This agent cannot write or perform destructive actions
+
+  oc_build:
+    if: |
+      contains(github.event.comment.body, '/oc-build') ||
+      contains(github.event.comment.body, '/opencode-build')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Run OpenCode (propose changes via PR)
+        uses: anomalyco/opencode/github@latest
+        env:
+          MAPLE_API_KEY: ${{ secrets.MAPLE_API_KEY }}
+          MAPLE_BASE_URL: ${{ vars.MAPLE_BASE_URL }}
+        with:
+          model: maple/z-ai/glm-4.7
+          agent: build

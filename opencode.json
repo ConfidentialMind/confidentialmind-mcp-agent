@@ -14,5 +14,71 @@
         }
       }
     }
+  },
+  "permission": {
+    // Default-deny; then allow only what you explicitly want in CI.
+    "*": "deny",
+    // Safe read-only tools
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow"
+    },
+    "list": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    // Writes: deny by default, optionally allow in "safe" areas
+    "edit": {
+      "*": "deny",
+      // Allow changes in application packages only (tune to your repo)
+      "packages/**": "allow",
+      // Explicitly deny sensitive zones
+      ".github/**": "deny",
+      "infra/**": "deny",
+      "k8s/**": "deny",
+      "**/terraform/**": "deny",
+      "**/*.tf": "deny"
+    },
+    // Shell: allow only common non-destructive commands; deny risky ones
+    "bash": {
+      "*": "deny",
+      // allow “read-only” git + basic tooling
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git show*": "allow",
+      "git log*": "allow",
+      "pnpm *": "allow",
+      "npm *": "allow",
+      "bun *": "allow",
+      // block common destructive / exfil / privilege-escalation commands
+      "rm *": "deny",
+      "sudo *": "deny",
+      "chmod *": "deny",
+      "chown *": "deny",
+      "curl *": "deny",
+      "wget *": "deny",
+      "ssh *": "deny",
+      "scp *": "deny",
+      // block deploy / infra mutation
+      "kubectl apply*": "deny",
+      "kubectl delete*": "deny",
+      "helm upgrade*": "deny",
+      "terraform apply*": "deny",
+      "terraform destroy*": "deny",
+      // block PR merging from CLI tools
+      "gh pr merge*": "deny"
+    },
+    // Hard safety guards
+    "external_directory": "deny",
+    "webfetch": "deny"
+  },
+  "agent": {
+    "plan": {
+      "permission": {
+        "edit": "deny",
+        "bash": "deny"
+      }
+    }
   }
 }
