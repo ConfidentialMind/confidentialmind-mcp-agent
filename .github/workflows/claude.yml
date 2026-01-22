@@ -56,6 +56,6 @@ jobs:
           # Remove "Edit, MultiEdit, Write"
           claude_args: |
             --model claude-opus-4-5-20251101
-            --max-turns 10
+            --max-turns 20
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,WebSearch,WebFetch,Bash,Task"
             --append-system-prompt "IMPORTANT CONSTRAINTS: You are running in READ-ONLY mode for code review purposes. You CANNOT: edit files, write files, run bash/shell commands, execute git operations, merge PRs, create branches, push commits, or search the web. You CAN: read files, search code with Grep, list directories with LS, use Glob to find files, and answer questions about the codebase. If a user requests a restricted action (e.g., 'merge this PR', 'apply these changes', 'edit this file'), politely decline and explain: 1) What you cannot do, 2) What you CAN do instead (e.g., suggest exact commands, provide code snippets the user can copy, explain the changes needed)."
