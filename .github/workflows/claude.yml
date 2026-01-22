@@ -1,172 +1,68 @@
 name: Claude Code
 
 on:
+  # issue_comment covers BOTH issues and PR comments
   issue_comment:
     types: [created]
+  # line level coments
   pull_request_review_comment:
     types: [created]
+  # PR review submissions
   pull_request_review:
     types: [submitted]
-  issues:
-    types: [opened, assigned]
-
-# Default to no token permissions; grant per-job only (least privilege)
-permissions: {}
-
-concurrency:
-  group: claude-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: false
-
-env:
-  CLAUDE_TRIGGER: "/claude"
-  CLAUDE_MODEL: "claude-opus-4-5-20251101"
 
 jobs:
-  # ---------------------------
-  # Read-only / non-destructive
-  # ---------------------------
-  claude_readonly:
-    name: Claude (readonly)
-    if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '/claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '/claude')) ||
-      (github.event_name == 'issues' && (
-        contains(github.event.issue.title, '/claude') ||
-        contains(github.event.issue.body, '/claude')
-      ))
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    # Minimal perms to read repo and post a reply to the relevant surface
-    permissions:
-      contents: read
-      issues: write
-      pull-requests: write
-      actions: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 1
-
-      - name: Run Claude Code (readonly)
-        id: claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          trigger_phrase: ${{ env.CLAUDE_TRIGGER }}
-          claude_args: |
-            --model ${{ env.CLAUDE_MODEL }}
-            --max-turns 8
-          # Deny anything with side effects
-          settings: |
-            {
-              "permissions": {
-                "defaultMode": "dontAsk",
-                "allow": ["Read", "Grep", "Glob", "LS"],
-                "deny": ["Edit", "Write", "Bash"]
-              }
-            }
-
-  # ------------------------------------------
-  # Write-enabled (gated + explicit trigger)
-  # ------------------------------------------
-  claude_apply:
-    name: Claude (apply - gated)
-    # Only runs when explicitly requested with "/claude apply"
-    # and the requester is an org member/collaborator/owner.
+  claude:
     if: |
       (
-        github.event_name == 'issue_comment' &&
-        contains(github.event.comment.body, '/claude apply') &&
-        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
-      ) || (
-        github.event_name == 'pull_request_review_comment' &&
-        contains(github.event.comment.body, '/claude apply') &&
-        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
-      ) || (
-        github.event_name == 'pull_request_review' &&
-        contains(github.event.review.body, '/claude apply') &&
-        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)
-      ) || (
-        github.event_name == 'issues' &&
-        (contains(github.event.issue.title, '/claude apply') || contains(github.event.issue.body, '/claude apply')) &&
-        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+        github.event_name == 'issue_comment' && 
+        github.event.issue.pull_request &&
+        (contains(github.event.comment.body, '@claude') || contains(github.event.comment.body, '/claude'))
+      ) ||
+      (
+        github.event_name == 'pull_request_review_comment' && 
+        (contains(github.event.comment.body, '@claude') || contains(github.event.comment.body, '/claude'))
+      ) ||
+      (
+        github.event_name == 'pull_request_review' && 
+        (contains(github.event.review.body, '@claude') || contains(github.event.review.body, '/claude'))
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    # Manual approval gate: configure Environment "claude-write" with required reviewers.
-    environment: claude-write
-
-    # Least privilege for making changes + opening/updating PRs + commenting
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
-      actions: read
-
+      # If we want to change Claude's access level in the future:
+      # To enable write access, change 'read' to 'write' for the relevant permissions below
+      contents: read # Change to 'write' to allow Claude to push commits
+      pull-requests: write # Required to post comments (kept as write for responses)
+      issues: read # Change to 'write' if you enable issue workflows later
+      actions: read # Required for Claude to read CI results on PRs
+      id-token: write # Required for OIDC token generation
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # Full history for better code context
 
-      - name: Run Claude Code (apply)
+      - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          trigger_phrase: ${{ env.CLAUDE_TRIGGER }}
+
+          # Support both @claude and /claude triggers
+          trigger_phrase: "@claude"
+
+          # Claude Opus 4.5 with extended thinking enabled
+          # Restricted to read-only tools (no file writes, no web search)
           claude_args: |
-            --model ${{ env.CLAUDE_MODEL }}
-            --max-turns 12
-          # Allow edits + tightly-scoped git operations; explicitly deny merges and other destructive actions.
-          settings: |
-            {
-              "permissions": {
-                "defaultMode": "dontAsk",
-                "allow": [
-                  "Read", "Grep", "Glob", "LS",
-                  "Edit", "Write",
-
-                  "Bash(git status:*)",
-                  "Bash(git diff:*)",
-                  "Bash(git log:*)",
-                  "Bash(git show:*)",
-
-                  "Bash(git checkout -b:*)",
-                  "Bash(git add:*)",
-                  "Bash(git commit:*)",
-
-                  "Bash(git push origin HEAD:*)"
-                ],
-                "deny": [
-                  # Keep merges human/manual
-                  "Bash(git merge:*)",
-                  "Bash(git rebase:*)",
-                  "Bash(git cherry-pick:*)",
-                  "Bash(gh pr merge:*)",
-                  "Bash(gh pr merge *)",
-
-                  # Prevent pushes to common protected branches
-                  "Bash(git push * main:*)",
-                  "Bash(git push * master:*)",
-                  "Bash(git push * --force:*)",
-                  "Bash(git push --force:*)",
-                  "Bash(git push -f:*)",
-
-                  # Block common high-risk commands (expand to your needs)
-                  "Bash(rm:*)",
-                  "Bash(sudo:*)",
-                  "Bash(curl:*)",
-                  "Bash(wget:*)",
-                  "Bash(terraform:*)",
-                  "Bash(pulumi:*)",
-                  "Bash(kubectl:*)",
-                  "Bash(helm:*)"
-                ]
-              }
-            }
+            --model claude-opus-4-5-20250514
+            --max-turns 10
+            --permission-mode read-only
+            --disallowedTools "WebSearch,WebFetch,Edit,Write,CreateFile,Bash(git push),Bash(git commit)"
+            --system-prompt "You are a code review assistant. Your primary functions are:
+              1. Review pull request changes and provide constructive feedback
+              2. Explain code, reviewer comments, and suggest improvements
+              3. Answer questions about the codebase
+              4. Suggest fixes that address reviewer feedback
+              
+              Be concise, specific, and actionable in your responses. Reference specific line numbers when relevant.
+              You are in READ-ONLY mode - you cannot make direct changes to the code."
