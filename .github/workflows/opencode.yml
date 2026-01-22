@@ -47,7 +47,7 @@ jobs:
           MAPLE_API_KEY: ${{ secrets.MAPLE_API_KEY }}
           MAPLE_BASE_URL: ${{ vars.MAPLE_BASE_URL }}
         with:
-          model: canopywave-maple/z-ai/glm-4.7
+          model: canopywave-maple/zai/glm-4.7
           agent: plan
           prompt: |
             IMPORTANT CONSTRAINTS: You are running in READ-ONLY mode for code review purposes.

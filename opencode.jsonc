@@ -9,15 +9,15 @@
         "apiKey": "{env:MAPLE_API_KEY}"
       },
       "models": {
-        "zlm-ai/glm-4.7": {
-          "name": "z-ai/glm-4.7",
+        "zai/glm-4.7": {
+          "name": "zai/glm-4.7",
         }
       }
     }
   },
 
   // Default model for this project
-  "model": "canopywave-maple/zlm-ai/glm-4.7",
+  "model": "canopywave-maple/zai/glm-4.7",
 
   // =========================================================================
   // GLOBAL PERMISSIONS
