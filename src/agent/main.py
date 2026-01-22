@@ -80,21 +80,20 @@ async def run_agent(
     database = Database(db_settings)
     success = await database.connect(db_url)
     if not success:
-        logger.error("Failed to connect to database")
+        logger.warning("Failed to connect to database. Continuing in stateless mode.")
         typer.secho(
-            "ERROR: Failed to connect to database. Check configuration and try again.",
-            fg=typer.colors.RED,
-        )
-        return
-
-    # Initialize schema if needed
-    success = await database.ensure_schema()
-    if not success:
-        logger.warning("Could not ensure database schema. Some operations might fail.")
-        typer.secho(
-            "WARNING: Could not ensure database schema. Some operations might fail.",
+            "WARNING: Failed to connect to database. Continuing in stateless mode.",
             fg=typer.colors.YELLOW,
         )
+    else:
+        # Initialize schema if needed
+        success = await database.ensure_schema()
+        if not success:
+            logger.warning("Could not ensure database schema. Some operations might fail.")
+            typer.secho(
+                "WARNING: Could not ensure database schema. Some operations might fail.",
+                fg=typer.colors.YELLOW,
+            )
 
     # Initialize LLM connector
     llm_connector = LLMConnector(llm_config_id)
