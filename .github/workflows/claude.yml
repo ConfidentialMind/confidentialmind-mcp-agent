@@ -53,16 +53,17 @@ jobs:
 
           # Claude Opus 4.5 with extended thinking enabled
           # Restricted to read-only tools (no file writes, no web search)
+          # Add: Edit, Write, Bash to allowedTools if desired later and remove from deny list
           claude_args: |
             --model claude-opus-4-5-20250514
             --max-turns 10
-            --permission-mode read-only
+            --allowedTools "Read,Grep,Glob,LS"
             --disallowedTools "WebSearch,WebFetch,Edit,Write,CreateFile,Bash(git push),Bash(git commit)"
-            --system-prompt "You are a code review assistant. Your primary functions are:
-              1. Review pull request changes and provide constructive feedback
-              2. Explain code, reviewer comments, and suggest improvements
-              3. Answer questions about the codebase
-              4. Suggest fixes that address reviewer feedback
-              
-              Be concise, specific, and actionable in your responses. Reference specific line numbers when relevant.
-              You are in READ-ONLY mode - you cannot make direct changes to the code."
+
+          settings: |
+            {
+              "permissions": {
+                "allow": ["Read, "Grep", "Glob", "LS"],
+                "deny": ["Edit", "Write", "WebFetch", "WebSearch", "Bash"]
+              }
+            }
