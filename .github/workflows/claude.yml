@@ -51,10 +51,10 @@ jobs:
           # Support both @claude and /claude triggers
           trigger_phrase: "@claude"
 
-          # Claude Opus 4.5 with extended thinking enabled
-          # Restricted to read-only tools (no file writes, no web search)
-          # Add: Edit, Write, Bash to allowedTools if desired later and remove from deny list
+          # Action ignores --allowedTools; use disallowedTools.
+          # To enable write access later:
+          # Remove "Edit, MultiEdit, Write"
           claude_args: |
             --model claude-opus-4-5-20251101
             --max-turns 10
-            --allowedTools "Read,Grep,Glob,LS"
+            --disallowedTools "Edit,MultiEdit,Write,WebSearch,WebFetch,Bash"
