@@ -1,0 +1,121 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "canopywave-maple": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "canopywave-maple",
+      "options": {
+        "baseURL": "{env:MAPLE_BASE_URL}",
+        "apiKey": "{env:MAPLE_API_KEY}"
+      },
+      "models": {
+        "zlm-ai/glm-4.7": {
+          "name": "z-ai/glm-4.7",
+        }
+      }
+    }
+  },
+
+  // Default model for this project
+  "model": "canopywave-maple/zlm-ai/glm-4.7",
+
+  // =========================================================================
+  // GLOBAL PERMISSIONS
+  // These apply to all agents unless overridden by agent-specific permissions
+  // =========================================================================
+  "permission": {
+    // Read-only tools: allow by default
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+
+    // Editing/writing: deny by default for safety
+    // To enable write access: change "deny" to "allow" or "ask"
+    "edit": "deny",
+
+    // Bash commands: deny by default
+    // To enable bash access: configure specific commands below
+    "bash": "deny",
+
+    // Web access: deny for safety (no web search function requirement)
+    "webfetch": "deny",
+
+    // Safety guards
+    "external_directory": "deny",
+    "doom_loop": "deny"
+  },
+
+  // =========================================================================
+  // AGENT CONFIGURATIONS
+  // =========================================================================
+  "agent": {
+    // Plan agent: read-only code review (used in CI)
+    "plan": {
+      "permission": {
+        "edit": "deny",
+        "bash": "deny",
+        "webfetch": "deny"
+      }
+    },
+
+    // Build agent: can make changes (commented out for reference)
+    // -----------------------------------------------------------------------
+    // To enable write access:
+    // 1. Uncomment the build agent configuration below
+    // 2. Update opencode.yml to use agent: build
+    // 3. Change permissions in opencode.yml to contents: write
+    // -----------------------------------------------------------------------
+    "build": {
+      "permission": {
+        // Allow edits only in application code directories
+        // Adjust these patterns to match your repository structure
+        "edit": {
+          "*": "deny",
+          "src/**": "allow",
+          "packages/**": "allow",
+          "lib/**": "allow",
+          // Explicitly deny sensitive areas
+          ".github/**": "deny",
+          "infra/**": "deny",
+          "k8s/**": "deny",
+          "**/terraform/**": "deny",
+          "**/*.tf": "deny"
+        },
+        // Bash: allow read-only git commands and package managers
+        "bash": {
+          "*": "deny",
+          // Read-only git commands
+          "git status*": "allow",
+          "git diff*": "allow",
+          "git show*": "allow",
+          "git log*": "allow",
+          // Package managers (adjust based on your stack)
+          "pnpm *": "allow",
+          "npm *": "allow",
+          "bun *": "allow",
+          "yarn *": "allow",
+          // Deny destructive commands
+          "rm *": "deny",
+          "sudo *": "deny",
+          "chmod *": "deny",
+          "chown *": "deny",
+          "curl *": "deny",
+          "wget *": "deny",
+          "ssh *": "deny",
+          "scp *": "deny",
+          // Deny deploy/infra mutation
+          "kubectl apply*": "deny",
+          "kubectl delete*": "deny",
+          "helm upgrade*": "deny",
+          "terraform apply*": "deny",
+          "terraform destroy*": "deny",
+          // Deny PR merging
+          "gh pr merge*": "deny"
+        },
+        // No web access
+        "webfetch": "deny"
+      }
+    }
+  }
+}
