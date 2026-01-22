@@ -55,15 +55,6 @@ jobs:
           # Restricted to read-only tools (no file writes, no web search)
           # Add: Edit, Write, Bash to allowedTools if desired later and remove from deny list
           claude_args: |
-            --model claude-opus-4-5-20250514
+            --model claude-opus-4-5-20251101
             --max-turns 10
             --allowedTools "Read,Grep,Glob,LS"
-            --disallowedTools "WebSearch,WebFetch,Edit,Write,CreateFile,Bash(git push),Bash(git commit)"
-
-          settings: |
-            {
-              "permissions": {
-                "allow": ["Read, "Grep", "Glob", "LS"],
-                "deny": ["Edit", "Write", "WebFetch", "WebSearch", "Bash"]
-              }
-            }
