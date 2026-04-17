@@ -1,5 +1,9 @@
 # ConfidentialMind MCP Agent
 
+> [!NOTE]
+> This repository is no longer actively maintained. The code here is an old prototype agent harness used for demos. Development has since moved to our internal monorepo and this project will not receive further updates or support.
+
+
 A flexible FastMCP client application for interacting with Model Context Protocol (MCP) servers to execute complex workflows. The agent supports both CLI and API modes with configurable transport options and includes an OpenAI API-compatible endpoint with comprehensive observability features.
 
 ## Overview
